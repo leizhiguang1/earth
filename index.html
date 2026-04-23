@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
   <title>Earth — Iconic Landmarks</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -2562,6 +2563,7 @@
       homeCountry:   'entry.1113213026',
       clientCountry: 'entry.896519511',
       earnings:      'entry.475770546',
+      monthlyIncome: 'entry.1744618812',
     };
 
     // Webinar landing page (one URL for now; params allow geo-routing later)
@@ -2587,9 +2589,6 @@
     // E.164-ish: optional +, 8–15 digits, spaces/dashes allowed
     const isValidWa = s => /^\+?[\d][\d\s-]{7,16}$/.test(s.trim());
 
-    const hasSubmitted = () => !!localStorage.getItem('fb_lead_email');
-    const markSubmitted = (email) => { try { localStorage.setItem('fb_lead_email', email); } catch(e) {} };
-
     function buildWebinarURL({email, country}) {
       const url = new URL(WEBINAR_URL);
       if (email)   url.searchParams.set('email', email);
@@ -2600,13 +2599,14 @@
       return url.toString();
     }
 
-    function postLeadToGForm({email, whatsapp, homeCountry, clientCountry, earnings}) {
+    function postLeadToGForm({email, whatsapp, homeCountry, clientCountry, earnings, monthlyIncome}) {
       const body = new URLSearchParams();
       body.append(GFORM_ENTRY.email, email);
       body.append(GFORM_ENTRY.whatsapp, whatsapp);
       if (homeCountry)   body.append(GFORM_ENTRY.homeCountry,   homeCountry);
       if (clientCountry) body.append(GFORM_ENTRY.clientCountry, clientCountry);
       if (earnings)      body.append(GFORM_ENTRY.earnings,      earnings);
+      if (monthlyIncome) body.append(GFORM_ENTRY.monthlyIncome, monthlyIncome);
       return fetch(`https://docs.google.com/forms/d/e/${GFORM_ID}/formResponse`, {
         method: 'POST', mode: 'no-cors',
         headers: {'Content-Type':'application/x-www-form-urlencoded'},
@@ -2615,7 +2615,7 @@
     }
 
     // Validate + submit + switch to thanks UI + start redirect countdown
-    function handleLeadSubmit({emailInput, waInput, errorEl, formEl, thanksEl, submitBtn, countdownEl, homeCountry, clientCountry, earnings, onDone}) {
+    function handleLeadSubmit({emailInput, waInput, errorEl, formEl, thanksEl, submitBtn, countdownEl, homeCountry, clientCountry, earnings, monthlyIncome, onDone}) {
       errorEl.style.display = 'none';
       const email = emailInput.value.trim();
       if (!isValidEmail(email)) {
@@ -2635,8 +2635,7 @@
       const origText = submitBtn.textContent;
       submitBtn.textContent = 'Sending...';
 
-      postLeadToGForm({email, whatsapp, homeCountry, clientCountry, earnings});
-      markSubmitted(email);
+      postLeadToGForm({email, whatsapp, homeCountry, clientCountry, earnings, monthlyIncome});
 
       // Optimistic success (no-cors is opaque)
       setTimeout(() => {
@@ -2726,7 +2725,7 @@
         <div id="lead-form">
           <div style="font-size:11px;letter-spacing:2.5px;text-transform:uppercase;color:#C084FC;font-weight:800;margin-bottom:8px;">🎯 Free Training</div>
           <div id="lead-headline" style="font-size:22px;font-weight:800;color:#fff;line-height:1.25;margin-bottom:8px;">Land clients paying <span style="color:#C084FC">US/UK/AU rates</span></div>
-          <div style="font-size:14px;color:rgba(255,255,255,0.72);line-height:1.5;margin-bottom:20px;">The exact playbook freelancers use to land high-tier country clients. Delivered to your inbox + WhatsApp.</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.65);line-height:1.45;margin-bottom:18px;">Free playbook — delivered to your inbox + WhatsApp.</div>
           <div style="display:grid;gap:10px;">
             <input id="lead-email" type="email" placeholder="Your email" required autocomplete="email" />
             <input id="lead-wa" type="tel" placeholder="WhatsApp (with country code)" autocomplete="tel" required />
@@ -2742,7 +2741,6 @@
             </button>
             <div id="lead-error" style="display:none;font-size:12px;color:#FF8A80;margin-top:4px;text-align:center;"></div>
           </div>
-          <div style="font-size:11px;color:rgba(255,255,255,0.38);margin-top:16px;text-align:center;letter-spacing:0.3px;">🔒 No spam. Unsubscribe anytime.</div>
         </div>
 
         <div id="lead-thanks" style="display:none;text-align:center;padding:18px 8px 8px;">
@@ -2775,7 +2773,7 @@
     // Track context that triggered the modal (for GForm tagging + redirect params)
     // `country` = clicked/selected country object (used for headline + redirect)
     // `homeCountry` / `earnings` populated only when opened from the sidebar calculator
-    let _modalContext = { country: null, homeCountry: null, earnings: null };
+    let _modalContext = { country: null, homeCountry: null, earnings: null, monthlyIncome: null };
     let _cpCurrentCountry = null;
 
     function contextualHeadline(country) {
@@ -2790,27 +2788,26 @@
       }
     }
 
-    function openLeadModal({country, homeCountry, earnings}) {
-      _modalContext = { country, homeCountry: homeCountry || null, earnings: earnings || null };
+    function openLeadModal({country, homeCountry, earnings, monthlyIncome}) {
+      _modalContext = {
+        country,
+        homeCountry:   homeCountry   || null,
+        earnings:      earnings      || null,
+        monthlyIncome: monthlyIncome || null,
+      };
       leadHeadline.innerHTML = contextualHeadline(country);
       leadErr.style.display = 'none';
 
-      if (hasSubmitted()) {
-        // Already signed up — show thanks state with direct "go to training" (no countdown)
-        leadForm.style.display = 'none';
-        leadThanks.style.display = 'block';
-        leadRedirMsg.innerHTML = 'You\'re already signed up — tap below to jump to your training.';
-      } else {
-        leadForm.style.display = 'block';
-        leadThanks.style.display = 'none';
-        leadEmail.value = '';
-        leadWa.value = '';
-        leadSubmit.disabled = false;
-        leadSubmit.textContent = 'Get Instant Access →';
-      }
+      leadForm.style.display = 'block';
+      leadThanks.style.display = 'none';
+      leadEmail.value = '';
+      leadWa.value = '';
+      leadSubmit.disabled = false;
+      leadSubmit.textContent = 'Get Instant Access →';
+
       leadBackdrop.style.display = 'flex';
       // Autofocus on desktop; avoid on mobile to prevent keyboard pop-up surprise
-      if (window.innerWidth > 700 && !hasSubmitted()) {
+      if (window.innerWidth > 700) {
         setTimeout(() => leadEmail.focus(), 80);
       }
     }
@@ -2831,12 +2828,12 @@
         homeCountry:   _modalContext.homeCountry,
         clientCountry: _modalContext.country ? _modalContext.country.name : null,
         earnings:      _modalContext.earnings,
+        monthlyIncome: _modalContext.monthlyIncome,
       });
     });
     leadGoto.addEventListener('click', () => {
-      const email = localStorage.getItem('fb_lead_email') || leadEmail.value.trim();
       window.location.href = buildWebinarURL({
-        email,
+        email: leadEmail.value.trim(),
         country: _modalContext.country ? _modalContext.country.name : null
       });
     });
@@ -2850,51 +2847,19 @@
     const cpCtaHead   = document.getElementById('cp-cta-headline');
     const calcCta     = document.getElementById('calc-cta');
 
-    // Update button label when user has already submitted (both cpanel + sidebar)
-    function refreshCtaButtons() {
-      const submitted = hasSubmitted();
-      [cpOpenBtn, calcOpenBtn].forEach(btn => {
-        if (!btn) return;
-        if (submitted) {
-          btn.innerHTML = '✓ Go to your training →';
-          btn.style.background = 'linear-gradient(135deg,#69F0AE,#2bc876)';
-          btn.style.boxShadow  = '0 8px 26px rgba(105,240,174,0.45), inset 0 1px 0 rgba(255,255,255,0.25)';
-          btn.style.color      = '#042b18';
-        } else {
-          btn.innerHTML = '🎯 Get Free Training →';
-          btn.style.background = 'linear-gradient(135deg,#B855F7,#7C3AED)';
-          btn.style.boxShadow  = '0 8px 26px rgba(168,85,247,0.45), inset 0 1px 0 rgba(255,255,255,0.25)';
-          btn.style.color      = '#fff';
-        }
-      });
-    }
-    refreshCtaButtons();
-
     cpOpenBtn.addEventListener('click', () => {
-      if (hasSubmitted()) {
-        // Already signed up — skip modal, go straight to training
-        const email = localStorage.getItem('fb_lead_email') || '';
-        window.location.href = buildWebinarURL({
-          email, country: _cpCurrentCountry ? _cpCurrentCountry.name : null
-        });
-        return;
-      }
       openLeadModal({ country: _cpCurrentCountry });
     });
     calcOpenBtn.addEventListener('click', () => {
       const clientIdx = parseInt(calcClient.value);
       const country = Number.isInteger(clientIdx) ? COUNTRIES[clientIdx] : null;
-      if (hasSubmitted()) {
-        const email = localStorage.getItem('fb_lead_email') || '';
-        window.location.href = buildWebinarURL({
-          email, country: country ? country.name : null
-        });
-        return;
-      }
       const homeIdx = parseInt(calcHome.value);
       const homeCountry = Number.isInteger(homeIdx) ? COUNTRIES[homeIdx].name : null;
       const earnings = calcTotalHome.textContent || null;
-      openLeadModal({ country, homeCountry, earnings });
+      const incomeVal = (calcIncome.value || '').toString().trim();
+      const homeCode = Number.isInteger(homeIdx) ? getCode(homeIdx) : '';
+      const monthlyIncome = incomeVal ? (homeCode ? `${incomeVal} ${homeCode}` : incomeVal) : null;
+      openLeadModal({ country, homeCountry, earnings, monthlyIncome });
     });
 
     // Hover affordances for purple buttons
@@ -2933,7 +2898,6 @@
         head = 'Land clients paying <span style="color:#C084FC">USD rates</span>';
       }
       cpCtaHead.innerHTML = head;
-      refreshCtaButtons();
 
       // Auto-sync calculator: set clicked country as the "client" so earnings
       // calculate against it immediately

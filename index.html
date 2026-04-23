@@ -2607,6 +2607,7 @@
       if (clientCountry) body.append(GFORM_ENTRY.clientCountry, clientCountry);
       if (earnings)      body.append(GFORM_ENTRY.earnings,      earnings);
       if (monthlyIncome) body.append(GFORM_ENTRY.monthlyIncome, monthlyIncome);
+      console.log('[postLeadToGForm] body →', body.toString());
       return fetch(`https://docs.google.com/forms/d/e/${GFORM_ID}/formResponse`, {
         method: 'POST', mode: 'no-cors',
         headers: {'Content-Type':'application/x-www-form-urlencoded'},
@@ -2859,6 +2860,14 @@
       const incomeVal = (calcIncome.value || '').toString().trim();
       const homeCode = Number.isInteger(homeIdx) ? getCode(homeIdx) : '';
       const monthlyIncome = incomeVal ? (homeCode ? `${incomeVal} ${homeCode}` : incomeVal) : null;
+      console.log('[sidebar CTA click]', {
+        'calcHome.value':        calcHome.value,
+        'calcClient.value':      calcClient.value,
+        'calcIncome.value':      calcIncome.value,
+        'calcTotalHome.textContent': calcTotalHome.textContent,
+        homeIdx, clientIdx, homeCountry, earnings, monthlyIncome,
+        country: country ? country.name : null,
+      });
       openLeadModal({ country, homeCountry, earnings, monthlyIncome });
     });
 

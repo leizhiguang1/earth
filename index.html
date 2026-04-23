@@ -1,0 +1,3607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Earth — Iconic Landmarks</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #010408; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- 2D weather overlay: rendered on top of Three.js canvas, behind panel (z-index 200) -->
+  <canvas id="weatherCanvas" style="position:fixed;top:0;left:0;z-index:150;pointer-events:none;"></canvas>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    try {
+
+    // ═══════════════════════════════════════════
+    //  RENDERER
+    // ═══════════════════════════════════════════
+    function W() { return window.innerWidth  || document.documentElement.clientWidth  || 800; }
+    function H() { return window.innerHeight || document.documentElement.clientHeight || 600; }
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(W(), H());
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
+
+    // ═══════════════════════════════════════════
+    //  SCENE / CAMERA
+    // ═══════════════════════════════════════════
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x010408);
+    const camera = new THREE.PerspectiveCamera(40, W() / H(), 0.01, 300);
+    camera.position.set(0, 0.5, 5.5);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+    controls.minDistance = 2.2;
+    controls.maxDistance = 10;
+
+
+    // ═══════════════════════════════════════════
+    //  LIGHTING
+    // ═══════════════════════════════════════════
+    scene.add(new THREE.AmbientLight(0x445566, 2.75));
+
+    const key = new THREE.DirectionalLight(0xFFF8E8, 1.75);
+    key.position.set(6, 8, 4);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.left   = -4; key.shadow.camera.right = 4;
+    key.shadow.camera.top    =  4; key.shadow.camera.bottom = -4;
+    key.shadow.camera.near   = 0.5; key.shadow.camera.far = 40;
+    key.shadow.bias = -0.0003;
+    scene.add(key);
+    const fillLight = new THREE.DirectionalLight(0x3355AA, 1.1);
+    fillLight.position.set(-5, -3, -5);
+    scene.add(fillLight);
+    const rimLight = new THREE.DirectionalLight(0x224488, 0.7);
+    rimLight.position.set(0, -8, -4);
+    scene.add(rimLight);
+
+    // ═══════════════════════════════════════════
+    //  STARS
+    // ═══════════════════════════════════════════
+    function rng(seed) {
+      let s = seed >>> 0;
+      return () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (s >>> 0) / 4294967296; };
+    }
+    {
+      const r = rng(77777), verts = [], cols = [];
+      for (let i = 0; i < 4000; i++) {
+        const th = r() * Math.PI * 2, ph = Math.acos(2 * r() - 1), d = 80 + r() * 60;
+        verts.push(d * Math.sin(ph) * Math.cos(th), d * Math.cos(ph), d * Math.sin(ph) * Math.sin(th));
+        const b = 0.4 + r() * 0.6;
+        const c = r() > 0.85 ? new THREE.Color().setHSL(0.6 + r() * 0.1, 0.6, b) : new THREE.Color(b, b, b);
+        cols.push(c.r, c.g, c.b);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+      g.setAttribute('color',    new THREE.Float32BufferAttribute(cols,  3));
+      scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 0.13, vertexColors: true, sizeAttenuation: true })));
+    }
+
+    // ═══════════════════════════════════════════
+    //  PROCEDURAL EARTH TEXTURE
+    //  (canvas-drawn world map — no external URL)
+    // ═══════════════════════════════════════════
+    let earthCanvas = null; // saved for land/ocean pixel detection
+    function buildEarthTexture() {
+      const W = 2048, H = 1024;
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+
+      // Ocean — rich vivid blue + depth gradient
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0,   '#0E5FAA');
+      grad.addColorStop(0.3, '#1A70C0');
+      grad.addColorStop(0.7, '#1A70C0');
+      grad.addColorStop(1,   '#0E5FAA');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+
+      // Helper: lat/lon → pixel
+      const px = (lon, lat) => [(lon + 180) / 360 * W, (90 - lat) / 180 * H];
+
+      // Land fill + outline for crisp coastlines
+      function land(points, fill) {
+        ctx.beginPath();
+        points.forEach(([lon, lat], i) => {
+          const [x, y] = px(lon, lat);
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,240,180,0.55)';
+        ctx.lineWidth = 3.5;
+        ctx.stroke();
+      }
+
+      // ── North America ──
+      land([[-168,72],[-140,72],[-120,60],[-80,50],[-65,47],[-60,46],[-65,44],[-70,42],[-75,35],[-80,25],[-88,16],[-83,10],[-77,8],[-78,5],[-85,11],[-92,15],[-105,20],[-117,30],[-120,37],[-124,48],[-130,54],[-140,58],[-155,60],[-168,63]], '#3CB828');
+      land([[-105,48],[-90,48],[-80,40],[-88,30],[-100,28],[-105,30],[-105,48]], '#90C840'); // Great Plains
+      land([[-168,72],[-155,60],[-150,62],[-145,62],[-142,60],[-132,56],[-130,54],[-140,58],[-155,60],[-168,63],[-180,65],[-180,72]], '#3CB828'); // Alaska
+      land([[-65,84],[-20,84],[-18,76],[-22,72],[-30,70],[-45,68],[-55,70],[-60,76],[-65,80]], '#C8E0EC'); // Greenland ice
+
+      // ── South America ──
+      land([[-80,12],[-77,8],[-78,5],[-73,1],[-60,-5],[-50,-5],[-35,-8],[-35,-15],[-40,-20],[-50,-30],[-55,-35],[-68,-55],[-75,-50],[-75,-40],[-72,-30],[-70,-20],[-75,-10],[-80,0],[-80,8],[-80,12]], '#28A818');
+      land([[-78,2],[-72,-2],[-60,-12],[-50,-8],[-48,0],[-58,5],[-70,4],[-78,2]], '#109808'); // Amazon
+      land([[-75,-38],[-55,-38],[-58,-55],[-68,-55],[-75,-45]], '#A0B860'); // Patagonia
+
+      // ── Europe ──
+      land([[0,51],[2,48],[-5,44],[0,37],[5,36],[12,38],[16,38],[18,40],[16,46],[12,47],[8,48],[0,48],[-5,48],[0,51]], '#58A828');
+      land([[-8,44],[-2,44],[3,40],[-2,36],[-8,38],[-8,44]], '#98C840'); // Iberia
+      land([[5,58],[8,58],[10,56],[12,56],[18,58],[25,65],[28,70],[20,70],[15,68],[10,62],[5,58]], '#48A020');
+      land([[25,65],[30,65],[30,70],[27,70],[25,70],[28,65]], '#48A020');
+      land([[16,46],[18,47],[20,48],[22,44],[20,42],[16,42],[16,46]], '#58A828');
+
+      // ── Africa ──
+      land([[-5,36],[0,37],[5,36],[12,33],[25,32],[35,30],[42,12],[44,10],[42,4],[40,0],[38,-6],[35,-18],[32,-25],[28,-30],[25,-34],[18,-34],[15,-22],[10,-18],[5,-5],[0,5],[-5,8],[-8,4],[-16,0],[-16,12],[-18,16],[-15,20],[-12,25],[-5,36]], '#50A020');
+      land([[-5,36],[42,36],[42,20],[30,15],[20,10],[5,14],[0,18],[-5,20],[-12,25],[-5,36]], '#E0B840'); // Sahara
+      land([[10,2],[15,-2],[28,-4],[30,2],[22,6],[10,6],[10,2]], '#109808'); // Congo
+
+      // ── Middle East / Arabia ──
+      land([[35,30],[42,30],[56,24],[58,20],[50,12],[44,10],[42,12],[35,22],[35,30]], '#E0B840');
+
+      // ── Russia / Central Asia ──
+      land([[30,70],[40,68],[60,68],[80,73],[100,70],[120,72],[140,72],[168,65],[180,65],[180,72],[140,75],[80,78],[60,73],[30,73],[30,70]], '#3A8018');
+      land([[30,70],[30,55],[35,48],[40,42],[50,40],[60,42],[75,42],[80,42],[85,50],[90,55],[100,55],[120,50],[130,45],[135,46],[135,48],[130,55],[115,55],[100,60],[80,62],[60,60],[45,58],[35,58],[30,60],[28,65],[30,70]], '#3A8818');
+      land([[50,50],[70,50],[85,45],[75,38],[60,38],[50,42],[50,50]], '#B0B858'); // Central Asian steppe
+      land([[90,48],[120,50],[115,38],[100,38],[90,40],[90,48]], '#E0B840'); // Gobi Desert
+
+      // ── South Asia ──
+      land([[60,22],[70,22],[78,32],[82,28],[88,28],[92,24],[94,20],[80,10],[72,8],[68,24],[60,26],[60,22]], '#48A020');
+      land([[65,30],[75,32],[75,26],[68,24],[65,28],[65,30]], '#E0B840'); // Thar desert
+
+      // ── Southeast Asia ──
+      land([[92,24],[100,20],[104,2],[110,1],[115,5],[118,8],[120,16],[115,22],[108,22],[100,15],[92,22],[92,24]], '#28A018');
+      land([[108,2],[115,3],[117,5],[115,7],[110,6],[108,4],[108,2]], '#18A008'); // Borneo
+      land([[95,5],[105,2],[106,-2],[103,-5],[96,-2],[95,3],[95,5]], '#18A008'); // Sumatra
+      land([[105,-6],[112,-7],[114,-8],[107,-8],[105,-6]], '#28A018'); // Java
+
+      // ── East Asia ──
+      land([[120,50],[130,45],[135,46],[140,42],[140,36],[120,32],[110,22],[104,2],[100,20],[108,22],[115,22],[120,30],[130,35],[135,35],[130,42],[120,48],[115,48],[115,52],[120,50]], '#3A8818');
+      land([[130,32],[131,34],[133,36],[136,38],[140,41],[142,44],[142,40],[138,36],[130,32]], '#48A020'); // Japan
+
+      // ── Australia ──
+      land([[114,-22],[118,-18],[122,-18],[130,-12],[136,-12],[138,-16],[140,-20],[148,-20],[152,-27],[151,-30],[150,-35],[148,-38],[145,-39],[140,-38],[136,-34],[130,-32],[125,-34],[118,-30],[115,-26],[114,-22]], '#C87030');
+      land([[148,-28],[152,-28],[150,-35],[148,-38],[145,-39],[145,-32],[148,-28]], '#58A028'); // SE Australia coast
+      land([[170,-36],[174,-38],[172,-42],[168,-44],[168,-42],[172,-38],[170,-36]], '#48A020'); // NZ
+
+      // ── Antarctica ──
+      land([[-180,-72],[-140,-72],[-90,-72],[-30,-72],[30,-70],[60,-70],[90,-72],[120,-72],[150,-72],[180,-72],[180,-80],[-180,-80]], '#D8EEF8');
+
+      // River lines on texture
+      ctx.strokeStyle = 'rgba(30,130,220,0.7)';
+      ctx.lineWidth = 2.5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap  = 'round';
+      // Amazon
+      [[[px(-80,0),px(-75,2),px(-68,-2),px(-60,-4),px(-52,-3),px(-48,0)],'river'],
+       // Nile
+       [[px(33,4),px(32,10),px(31,20),px(31,30),px(32,35)],'river'],
+       // Mississippi
+       [[px(-90,30),px(-90,35),px(-88,38),px(-90,42),px(-92,45)],'river'],
+       // Congo
+       [[px(25,-4),px(18,0),px(15,4)],'river'],
+       // Yangtze
+       [[px(100,28),px(108,30),px(115,32),px(121,31)],'river'],
+       // Ob/Irtysh
+       [[px(68,68),px(68,60),px(66,54),px(62,50)],'river'],
+      ].forEach(([[...pts]])=>{
+        ctx.beginPath();
+        pts.forEach(([x,y],i)=>i===0?ctx.moveTo(x,y):ctx.lineTo(x,y));
+        ctx.stroke();
+      });
+
+      // Texture noise
+      const imgData = ctx.getImageData(0, 0, W, H);
+      const d = imgData.data;
+      const nr = rng(42);
+      for (let i = 0; i < d.length; i += 4) {
+        const n = (nr() - 0.5) * 8;
+        d[i]   = Math.max(0, Math.min(255, d[i]   + n));
+        d[i+1] = Math.max(0, Math.min(255, d[i+1] + n));
+        d[i+2] = Math.max(0, Math.min(255, d[i+2] + n));
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      earthCanvas = canvas;
+      return new THREE.CanvasTexture(canvas);
+    }
+
+    const earthTex = buildEarthTexture();
+
+    // ═══════════════════════════════════════════
+    //  GLOBE
+    // ═══════════════════════════════════════════
+    const globe = new THREE.Group();
+    globe.rotation.z = 0.41;
+    scene.add(globe);
+    const R = 1.5;
+
+    function ll2v(lat, lon, r = R) {
+      const phi   = (90 - lat) * Math.PI / 180;
+      const theta = (lon + 180) * Math.PI / 180;
+      return new THREE.Vector3(
+        -r * Math.sin(phi) * Math.cos(theta),
+         r * Math.cos(phi),
+         r * Math.sin(phi) * Math.sin(theta)
+      );
+    }
+    function placeAt(obj, lat, lon, r = R) {
+      const pos = ll2v(lat, lon, r);
+      obj.position.copy(pos);
+      // Align +Y (up direction of building) with the outward radial normal
+      const outward = pos.clone().normalize();
+      obj.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), outward);
+    }
+
+    // ── Ocean — glossy reflective water ──────
+    const ocean = new THREE.Mesh(
+      new THREE.SphereGeometry(R - 0.005, 128, 128),
+      new THREE.MeshStandardMaterial({
+        color: 0x1565C0, roughness: 0.01, metalness: 0.65,
+        emissive: new THREE.Color(0.04, 0.18, 0.55), emissiveIntensity: 0.7,
+        envMapIntensity: 1.2,
+      })
+    );
+    ocean.receiveShadow = true;
+    globe.add(ocean);
+
+    // ── Earth surface ────────────────────────
+    const earth = new THREE.Mesh(
+      new THREE.SphereGeometry(R, 128, 128),
+      new THREE.MeshStandardMaterial({
+        map: earthTex,
+        roughness: 0.88, metalness: 0.0,
+        emissive: new THREE.Color(0.01, 0.02, 0.01),
+        emissiveIntensity: 0.15,
+      })
+    );
+    earth.receiveShadow = true;
+    globe.add(earth);
+
+    // ── Lat/Lon grid ─────────────────────────
+    const gridMat = new THREE.LineBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.12, depthWrite: false });
+    for (let lat = -80; lat <= 80; lat += 20) {
+      const phi = (90 - lat) * Math.PI / 180;
+      const pts = [];
+      for (let i = 0; i <= 128; i++) {
+        const t = (i / 128) * Math.PI * 2, r = R + 0.003;
+        pts.push(new THREE.Vector3(-r*Math.sin(phi)*Math.cos(t), r*Math.cos(phi), r*Math.sin(phi)*Math.sin(t)));
+      }
+      globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+    }
+    for (let lon = 0; lon < 360; lon += 20) {
+      const t = (lon + 180) * Math.PI / 180;
+      const pts = [];
+      for (let i = 0; i <= 64; i++) {
+        const phi = (i / 64) * Math.PI, r = R + 0.003;
+        pts.push(new THREE.Vector3(-r*Math.sin(phi)*Math.cos(t), r*Math.cos(phi), r*Math.sin(phi)*Math.sin(t)));
+      }
+      globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+    }
+
+    // ── Atmosphere ───────────────────────────
+    globe.add(new THREE.Mesh(
+      new THREE.SphereGeometry(R + 0.15, 64, 64),
+      new THREE.ShaderMaterial({
+        vertexShader: `
+          varying vec3 vN, vV;
+          void main() {
+            vN = normalize(mat3(modelMatrix) * normal);
+            vV = normalize(cameraPosition - (modelMatrix * vec4(position,1.0)).xyz);
+            gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position,1.0);
+          }`,
+        fragmentShader: `
+          varying vec3 vN, vV;
+          void main() {
+            float f = pow(1.0 - max(dot(vN,vV),0.0), 3.5);
+            gl_FragColor = vec4(0.04 + 0.1*f, 0.3*f, 1.0*f, f * 0.72);
+          }`,
+        transparent: true, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.FrontSide,
+      })
+    ));
+
+    // ── Polar ice caps — bright white ────────
+    const iceMat = new THREE.MeshStandardMaterial({
+      color: 0xD8EEF8, roughness: 0.50, metalness: 0.10,
+      emissive: new THREE.Color(0.15, 0.22, 0.30), emissiveIntensity: 0.8,
+    });
+    [-1, 1].forEach(p => {
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(R + 0.004, 48, 12, 0, Math.PI*2, 0, Math.PI*0.12), iceMat);
+      if (p === -1) cap.rotation.x = Math.PI;
+      globe.add(cap);
+    });
+
+    // ── City lights (night side) ─────────────
+    {
+      const clW = 2048, clH = 1024;
+      const clCanvas = document.createElement('canvas');
+      clCanvas.width = clW; clCanvas.height = clH;
+      const clCtx = clCanvas.getContext('2d');
+      clCtx.fillStyle = 'black';
+      clCtx.fillRect(0, 0, clW, clH);
+
+      const cities = [
+        [-74,41,1.0],[-87,42,0.9],[-118,34,0.9],[-77,39,0.8],[-71,42,0.7],
+        [-80,26,0.7],[-122,38,0.8],[-95,30,0.7],[-79,44,0.6],[-0.1,51,0.9],
+        [2,49,0.9],[13,52,0.9],[12,41,0.8],[4,52,0.8],[-4,40,0.7],
+        [37,55,0.8],[21,52,0.6],[29,41,0.7],[139,35,1.0],[121,31,0.9],
+        [116,40,0.9],[114,22,0.8],[103,1,0.8],[77,28,0.8],[72,19,0.8],
+        [127,37,0.8],[55,25,0.7],[151,-34,0.7],[-46,-24,0.8],[-43,-23,0.7],
+        [-99,19,0.7],[-58,-34,0.6],[31,30,0.6],[3,6,0.5],[28,-26,0.6],
+        [36,-1,0.5],[100,14,0.7],[106,-6,0.7],[101,3,0.6]
+      ];
+
+      cities.forEach(([lon, lat, br]) => {
+        const cx = (lon + 180) / 360 * clW;
+        const cy = (90 - lat) / 180 * clH;
+        const outerR = 18 * br;
+        const grd = clCtx.createRadialGradient(cx, cy, 0, cx, cy, outerR);
+        grd.addColorStop(0, `rgba(255,255,180,${br})`);
+        grd.addColorStop(1, `rgba(255,200,100,${br * 0.6})`);
+        clCtx.beginPath();
+        clCtx.arc(cx, cy, outerR, 0, Math.PI * 2);
+        clCtx.fillStyle = grd;
+        clCtx.fill();
+        // Inner bright spot
+        const grd2 = clCtx.createRadialGradient(cx, cy, 0, cx, cy, 4);
+        grd2.addColorStop(0, `rgba(255,255,180,${br})`);
+        grd2.addColorStop(1, 'rgba(255,255,180,0)');
+        clCtx.beginPath();
+        clCtx.arc(cx, cy, 4, 0, Math.PI * 2);
+        clCtx.fillStyle = grd2;
+        clCtx.fill();
+      });
+
+      const cityTex = new THREE.CanvasTexture(clCanvas);
+      const sunDirN = new THREE.Vector3(6, 8, 4).normalize();
+      const cityMat = new THREE.ShaderMaterial({
+        uniforms: {
+          cityMap: { value: cityTex },
+          sunDir:  { value: sunDirN }
+        },
+        vertexShader: `
+          varying vec2 vUv; varying vec3 vWorldNormal;
+          void main() {
+            vUv = uv;
+            vWorldNormal = normalize(mat3(modelMatrix) * normal);
+            gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position,1.0);
+          }`,
+        fragmentShader: `
+          uniform sampler2D cityMap; uniform vec3 sunDir;
+          varying vec2 vUv; varying vec3 vWorldNormal;
+          void main() {
+            float night = clamp(-dot(vWorldNormal, sunDir)*3.0, 0.0, 1.0);
+            vec4 c = texture2D(cityMap, vUv);
+            gl_FragColor = vec4(c.rgb * night, c.r * night);
+          }`,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.FrontSide,
+      });
+      const cityMesh = new THREE.Mesh(new THREE.SphereGeometry(R - 0.001, 128, 64), cityMat);
+      globe.add(cityMesh);
+    }
+
+    // ── Animated clouds ───────────────────────
+    let clouds;
+    {
+      const ccW = 2048, ccH = 1024;
+      const ccCanvas = document.createElement('canvas');
+      ccCanvas.width = ccW; ccCanvas.height = ccH;
+      const ccCtx = ccCanvas.getContext('2d');
+      ccCtx.clearRect(0, 0, ccW, ccH);
+
+      const cr2 = rng(11111);
+      for (let i = 0; i < 100; i++) {
+        const cx = cr2() * ccW;
+        const cy = cr2() * ccH;
+        const radius = 30 + cr2() * 80;
+        const alpha = 0.25 + cr2() * 0.30;
+        const scaleX = 1.5 + cr2() * 2.0;
+
+        ccCtx.save();
+        ccCtx.translate(cx, cy);
+        ccCtx.scale(scaleX, 1);
+        const grd = ccCtx.createRadialGradient(0, 0, 0, 0, 0, radius);
+        grd.addColorStop(0, `rgba(255,255,255,${alpha})`);
+        grd.addColorStop(1, 'rgba(255,255,255,0)');
+        ccCtx.beginPath();
+        ccCtx.arc(0, 0, radius, 0, Math.PI * 2);
+        ccCtx.fillStyle = grd;
+        ccCtx.fill();
+        ccCtx.restore();
+      }
+
+      const cloudTex = new THREE.CanvasTexture(ccCanvas);
+      clouds = new THREE.Mesh(
+        new THREE.SphereGeometry(R + 0.025, 128, 64),
+        new THREE.MeshStandardMaterial({
+          map: cloudTex,
+          transparent: true, opacity: 0.72,
+          depthWrite: false,
+          roughness: 0.9, metalness: 0.0,
+          emissive: new THREE.Color(1, 1, 1), emissiveIntensity: 0.05,
+        })
+      );
+      globe.add(clouds);
+    }
+
+    // ── Aurora Borealis ───────────────────────
+    let auroraMat;
+    {
+      auroraMat = new THREE.ShaderMaterial({
+        uniforms: { time: { value: 0.0 } },
+        vertexShader: `
+          varying vec3 vNorm; varying vec2 vUv;
+          void main() {
+            vNorm = normalize(mat3(modelMatrix) * normal);
+            vUv = uv;
+            gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position,1.0);
+          }`,
+        fragmentShader: `
+          uniform float time; varying vec3 vNorm; varying vec2 vUv;
+          float h21(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+          float n(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+          void main(){
+            float lat=abs(vNorm.y);
+            float zone=smoothstep(0.58,0.80,lat);
+            if(zone<0.01)discard;
+            float lon=atan(vNorm.z,vNorm.x);
+            float w=n(vec2(lon*5.0+time*0.35,time*0.18))*0.7+n(vec2(lon*12.0+time*0.6,time*0.3))*0.3;
+            float curtain=zone*(0.3+w*0.7);
+            vec3 green=vec3(0.0,0.95,0.45);
+            vec3 blue=vec3(0.15,0.55,1.0);
+            vec3 col=mix(green,blue,w);
+            gl_FragColor=vec4(col,curtain*0.55);
+          }`,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+      });
+      const auroraMesh = new THREE.Mesh(new THREE.SphereGeometry(R + 0.10, 64, 32), auroraMat);
+      globe.add(auroraMesh);
+    }
+
+    // Country border outlines removed
+
+    // ── Equator + prime meridian (orientation helpers) ────
+    {
+      const eqMat = new THREE.LineBasicMaterial({ color:0xFF7733, transparent:true, opacity:0.75, depthWrite:false });
+      const pmMat = new THREE.LineBasicMaterial({ color:0xFF7733, transparent:true, opacity:0.50, depthWrite:false });
+      const eqPts=[], pmPts=[];
+      for(let i=0;i<=128;i++) eqPts.push(ll2v(0,(i/128)*360-180,R+0.011));
+      for(let i=0;i<=64;i++) pmPts.push(ll2v((i/64)*180-90,0,R+0.011));
+      globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(eqPts),eqMat));
+      globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pmPts),pmMat));
+    }
+
+    // ── Continent labels (orientation) ──────────────────
+    {
+      function makeContLabel(text, color='#FFD966') {
+        const lines = text.split('\n');
+        const cw=256, ch=lines.length*44+8;
+        const c=document.createElement('canvas'); c.width=cw; c.height=ch;
+        const ctx=c.getContext('2d');
+        ctx.font='bold 32px system-ui,sans-serif';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        // shadow
+        ctx.fillStyle='rgba(0,0,0,0.55)';
+        lines.forEach((ln,i)=>ctx.fillText(ln,cw/2+2,ch/(lines.length+0.1)*(i+0.55)+2));
+        ctx.fillStyle=color;
+        lines.forEach((ln,i)=>ctx.fillText(ln,cw/2,ch/(lines.length+0.1)*(i+0.55)));
+        const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c),transparent:true,depthTest:true,depthWrite:false}));
+        sp.scale.set(0.55*lines.length*0.6+0.1, 0.10*lines.length+0.04, 1);
+        sp.renderOrder=30;
+        return sp;
+      }
+      [
+        ['NORTH\nAMERICA', 47, -100],
+        ['SOUTH\nAMERICA',-15, -58],
+        ['EUROPE',        52,   12],
+        ['AFRICA',         3,   20],
+        ['RUSSIA',        60,   90],
+        ['ASIA',          30,  100],
+        ['AUSTRALIA',    -25,  133],
+        ['PACIFIC\nOCEAN',  5, -150, '#88CCFF'],
+        ['ATLANTIC\nOCEAN',10,  -30, '#88CCFF'],
+        ['INDIAN\nOCEAN', -25,   75, '#88CCFF'],
+      ].forEach(([text,lat,lon,col]) => {
+        const lb = makeContLabel(text, col||'#FFD966');
+        lb.position.copy(ll2v(lat,lon,R+0.06));
+        globe.add(lb);
+      });
+    }
+
+    // ═══════════════════════════════════════════
+    //  3D VEGETATION
+    // ═══════════════════════════════════════════
+    const trunkMat = new THREE.MeshStandardMaterial({ color:0x5A3012, roughness:0.95, metalness:0.0 });
+    const pineMat  = new THREE.MeshStandardMaterial({ color:0x1C5C0A, roughness:0.90, metalness:0.0, emissive:new THREE.Color(0.02,0.08,0.01), emissiveIntensity:0.5 });
+    const tropMat  = new THREE.MeshStandardMaterial({ color:0x147808, roughness:0.88, metalness:0.0, emissive:new THREE.Color(0.02,0.10,0.01), emissiveIntensity:0.5 });
+    const palmMat  = new THREE.MeshStandardMaterial({ color:0x28A010, roughness:0.88, metalness:0.0, emissive:new THREE.Color(0.02,0.10,0.01), emissiveIntensity:0.5 });
+    const sandMat  = new THREE.MeshStandardMaterial({ color:0xC8A040, roughness:0.95, metalness:0.0 });
+    const cactMat  = new THREE.MeshStandardMaterial({ color:0x3A7820, roughness:0.85, metalness:0.0 });
+
+    // Pine tree (boreal/temperate)
+    function makePineTree(s=1) {
+      const g = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.0006*s,0.0009*s,0.006*s,5), trunkMat);
+      trunk.position.set(0,0.003*s,0); g.add(trunk);
+      [[0.005*s,0.007*s],[0.004*s,0.011*s],[0.0026*s,0.015*s]].forEach(([r,y])=>{
+        const tier = new THREE.Mesh(new THREE.ConeGeometry(r,0.006*s,6), pineMat);
+        tier.position.set(0,y,0); g.add(tier);
+      });
+      return g;
+    }
+
+    // Tropical tree (rainforest)
+    function makeTropTree(s=1) {
+      const g = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.0007*s,0.0010*s,0.010*s,5), trunkMat);
+      trunk.position.set(0,0.005*s,0); g.add(trunk);
+      const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.0065*s,7,5), tropMat);
+      canopy.scale.y=0.75; canopy.position.set(0,0.013*s,0); g.add(canopy);
+      // Extra drooping side canopies
+      [0,1.05,2.1,3.15,4.2,5.25].forEach(a=>{
+        const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.0035*s,5,4), tropMat);
+        leaf.position.set(Math.cos(a)*0.005*s,0.011*s,Math.sin(a)*0.005*s);
+        leaf.scale.y=0.5; g.add(leaf);
+      });
+      return g;
+    }
+
+    // Palm tree (tropical coast)
+    function makePalmTree(s=1) {
+      const g = new THREE.Group();
+      // Curved trunk using TubeGeometry
+      const curve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(0,0,0), new THREE.Vector3(0.002*s,0.006*s,0),
+        new THREE.Vector3(0.003*s,0.012*s,0.001*s), new THREE.Vector3(0.001*s,0.016*s,0),
+      ]);
+      g.add(new THREE.Mesh(new THREE.TubeGeometry(curve,6,0.0007*s,5), trunkMat));
+      // Fronds
+      for(let i=0;i<6;i++){
+        const a=i*(Math.PI/3); const fr=new THREE.Mesh(new THREE.ConeGeometry(0.001*s,0.010*s,4), palmMat);
+        fr.position.set(Math.cos(a)*0.004*s,0.017*s,Math.sin(a)*0.004*s);
+        fr.rotation.z=Math.cos(a)*0.7; fr.rotation.x=Math.sin(a)*0.7; g.add(fr);
+      }
+      return g;
+    }
+
+    // Desert cactus
+    function makeCactus(s=1) {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.0012*s,0.0015*s,0.010*s,7), cactMat);
+      body.position.set(0,0.005*s,0); g.add(body);
+      [[-0.3,1],[0.3,-1]].forEach(([xo,side])=>{
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.0008*s,0.001*s,0.006*s,5), cactMat);
+        arm.position.set(xo*0.003*s,0.007*s,0); arm.rotation.z=side*Math.PI*0.35; g.add(arm);
+      });
+      return g;
+    }
+
+    // Grass tuft — savanna / plains
+    const grassMat = new THREE.MeshStandardMaterial({color:0x78B838,roughness:0.90,metalness:0.0,emissive:new THREE.Color(0.06,0.14,0.01),emissiveIntensity:0.6});
+    function makeGrassTuft(s=1) {
+      const g = new THREE.Group();
+      for(let i=0;i<8;i++){
+        const a=i*(Math.PI*2/8);
+        const h=0.008*s*(0.6+Math.random()*0.8);
+        const blade = new THREE.Mesh(new THREE.ConeGeometry(0.0010*s,h,3), grassMat);
+        blade.position.set(Math.cos(a)*0.0035*s, h/2, Math.sin(a)*0.0035*s);
+        blade.rotation.z=Math.cos(a)*0.35; blade.rotation.x=Math.sin(a)*0.35;
+        g.add(blade);
+      }
+      // Center thick clump
+      const clump = new THREE.Mesh(new THREE.CylinderGeometry(0.002*s,0.003*s,0.007*s,6), grassMat);
+      clump.position.y=0.0035*s; g.add(clump);
+      return g;
+    }
+
+    // Scatter vegetation across the globe
+    const vegR = rng(31415);
+    // [latMin, latMax, lonMin, lonMax, count, type, dispScale]
+    const vegZones = [
+      // Boreal / Taiga — pine
+      [50,68,-135,-65, 80,'pine',1.0],   // Canadian boreal
+      [55,70, 60,140, 90,'pine',1.0],    // Siberian taiga
+      [48,65,  5, 30, 45,'pine',1.0],    // European forests
+      [58,70,  5, 30, 18,'pine',0.9],    // Scandinavia
+      // Temperate forests — pine
+      [30,50,-85,-65, 38,'pine',0.9],    // Eastern US
+      [35,50,125,145, 30,'pine',0.9],    // Japan/Korea
+      [25,40,-115,-100,22,'pine',0.9],   // Western US
+      // Tropical rainforest — trop
+      [-15,5,-80,-40, 75,'trop',1.1],    // Amazon
+      [-5, 5, 12, 30, 55,'trop',1.1],    // Congo
+      [-5,10, 95,120, 60,'trop',1.0],    // SE Asia
+      [-10,5,-60,-45, 22,'trop',1.0],    // SE S. America
+      // Palms — coast/tropics
+      [10,25,-90,-75, 18,'palm',1.0],    // Central America
+      [-5,15,105,115, 16,'palm',1.0],    // Indonesia
+      [10,20, 75, 90, 14,'palm',0.95],   // India coast
+      [0, 15, 30, 45, 12,'palm',0.90],   // East Africa coast
+      // Savanna / plains — grass
+      [-5,20,-18, 40, 65,'grass',1.0],   // African savanna
+      [25,48,-105,-88,45,'grass',0.95],  // N. American plains/prairie
+      [35,55, 60, 90, 35,'grass',0.90],  // C. Asian steppe
+      [-35,-15,-65,-50,25,'grass',0.90], // S. American pampas
+      [-35,-22,115,140,18,'grass',0.85], // Australian grassland
+      // Desert scrub — cactus
+      [15,28,-18, 50, 25,'cact',0.85],   // Sahara sparse
+      [20,32, 35, 60, 18,'cact',0.85],   // Arabian
+      [20,35,-115,-100,22,'cact',0.90],  // Sonoran desert
+    ];
+
+    const vegGroup = new THREE.Group();
+    globe.add(vegGroup);
+    // Scale multipliers per type
+    const vegScale = { pine:4.6, trop:4.5, palm:4.8, grass:5.0, cact:4.6 };
+    // Clustered scatter — trees clump into forest patches, not isolated dots
+    vegZones.forEach(([latMin,latMax,lonMin,lonMax,count,type,sc])=>{
+      const nClusters = Math.max(1, Math.round(count / 9));
+      const perCluster = Math.ceil(count / nClusters);
+      const spread = (type==='grass'||type==='cact') ? 4.0 : 2.0; // trees tight, grass looser
+      for(let c=0; c<nClusters; c++){
+        const clat = latMin + vegR()*(latMax-latMin);
+        const clon = lonMin + vegR()*(lonMax-lonMin);
+        for(let i=0; i<perCluster; i++){
+          const lat = clat + (vegR()-0.5)*2*spread;
+          const lon = clon + (vegR()-0.5)*2*spread;
+          let obj;
+          if(type==='pine')       obj=makePineTree(sc);
+          else if(type==='trop')  obj=makeTropTree(sc);
+          else if(type==='palm')  obj=makePalmTree(sc);
+          else if(type==='grass') obj=makeGrassTuft(sc);
+          else                    obj=makeCactus(sc);
+          placeAt(obj, lat, lon, R);
+          obj.scale.setScalar(vegScale[type]);
+          vegGroup.add(obj);
+        }
+      }
+    });
+
+    // ── 3D Mountain Ranges ────────────────────
+    function makeMtn(h=0.022, r=0.015, snowLine=0.60) {
+      const g = new THREE.Group();
+      const rock = new THREE.MeshStandardMaterial({color:0x7A7260,roughness:0.90,metalness:0.02,emissive:new THREE.Color(0.03,0.03,0.02),emissiveIntensity:0.3});
+      const snow = new THREE.MeshStandardMaterial({color:0xF2F0EC,roughness:0.65,metalness:0.01,emissive:new THREE.Color(0.08,0.08,0.09),emissiveIntensity:0.5});
+      const body = new THREE.Mesh(new THREE.ConeGeometry(r,h,7), rock);
+      body.position.y = h/2; g.add(body);
+      const capH=h*(1-snowLine), capR=r*(1-snowLine);
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(capR,capH,7), snow);
+      cap.position.y = h*snowLine + capH/2; g.add(cap);
+      return g;
+    }
+    const mtnGroup = new THREE.Group();
+    globe.add(mtnGroup);
+    // [lat, lon, height, radius]
+    const mtnPeaks = [
+      // Himalayas
+      [28.0,78.5,0.042,0.018],[28.0,82.0,0.040,0.017],[28.0,85.5,0.045,0.019],[28.0,88.5,0.038,0.016],[27.5,86.9,0.048,0.020],
+      [29.0,80.0,0.032,0.015],[27.8,84.0,0.034,0.015],[27.0,89.5,0.030,0.014],
+      // Andes
+      [-10,-75,0.038,0.016],[-15,-73,0.040,0.017],[-20,-68,0.042,0.018],[-25,-68,0.038,0.016],[-30,-70,0.034,0.015],[-35,-70,0.030,0.014],[-5,-78,0.035,0.015],
+      // Rockies
+      [40,-107,0.028,0.013],[44,-110,0.026,0.012],[48,-114,0.025,0.012],[36,-106,0.026,0.012],[50,-116,0.024,0.011],
+      // Alps
+      [46,8,0.022,0.010],[46,10,0.024,0.011],[46,12,0.022,0.010],[47,7,0.020,0.010],
+      // Caucasus
+      [43,42,0.026,0.011],[43,44,0.028,0.012],
+      // Atlas
+      [32,-5,0.018,0.009],[32,-2,0.017,0.009],
+      // East African Rift highlands
+      [-3,37,0.020,0.010],[-3,36,0.018,0.009],
+      // Urals
+      [60,60,0.015,0.008],[56,58,0.014,0.008],
+    ];
+    mtnPeaks.forEach(([lat,lon,h,r])=>{
+      const mt = makeMtn(h, r, 0.55);
+      placeAt(mt, lat, lon, R);
+      mt.scale.setScalar(4.2);   // scale up so peaks are clearly visible
+      mtnGroup.add(mt);
+    });
+
+    // ═══════════════════════════════════════════
+    //  MATERIAL HELPERS
+    // ═══════════════════════════════════════════
+    function realMat(hex, roughness=0.78, metalness=0.04) {
+      const c = new THREE.Color(hex);
+      return new THREE.MeshStandardMaterial({ color:c, roughness, metalness,
+      });
+    }
+    // Glass material — tinted, slightly reflective
+    function glassMat(hex=0x8AACBC) {
+      return new THREE.MeshStandardMaterial({
+        color: new THREE.Color(hex), roughness: 0.18, metalness: 0.55,
+        emissive: new THREE.Color(hex).multiplyScalar(0.03), emissiveIntensity: 0.35
+      });
+    }
+
+    // ═══════════════════════════════════════════
+    //  LANDMARK BUILDERS
+    // ═══════════════════════════════════════════
+
+    // — Eiffel Tower — wrought-iron #7A6840, curved TubeGeometry legs
+    function buildEiffel() {
+      const g=new THREE.Group(), m=realMat(0x7A6840,0.72,0.12);
+      const FOOT=0.042, H1=0.062, H2=0.104, HTOP=0.198;
+      for(let i=0;i<4;i++){
+        const a=(i/4)*Math.PI*2+Math.PI/4;
+        const fx=Math.cos(a)*FOOT, fz=Math.sin(a)*FOOT;
+        const curve=new THREE.CatmullRomCurve3([
+          new THREE.Vector3(fx,0.001,fz),
+          new THREE.Vector3(fx*0.55,H1*0.45,fz*0.55),
+          new THREE.Vector3(Math.cos(a)*0.007,H1,Math.sin(a)*0.007),
+        ]);
+        g.add(new THREE.Mesh(new THREE.TubeGeometry(curve,8,0.0028,5),m));
+      }
+      [H1,H2].forEach((y,i)=>{
+        const r=i===0?0.011:0.007;
+        const ring=new THREE.Mesh(new THREE.TorusGeometry(r,0.0012,4,18),m);
+        ring.position.y=y; ring.rotation.x=Math.PI/2; g.add(ring);
+      });
+      const s1=new THREE.Mesh(new THREE.CylinderGeometry(0.0055,0.009,H2-H1,8),m); s1.position.set(0,H1+(H2-H1)/2,0); g.add(s1);
+      const s2=new THREE.Mesh(new THREE.CylinderGeometry(0.0016,0.0055,HTOP-H2,8),m); s2.position.set(0,H2+(HTOP-H2)/2,0); g.add(s2);
+      const ant=new THREE.Mesh(new THREE.CylinderGeometry(0.0003,0.001,0.032,5),m); ant.position.set(0,HTOP+0.016,0); g.add(ant);
+      return g;
+    }
+
+    // — Burj Khalifa — high-reflectance glass + aluminium
+    function buildBurj() {
+      const g=new THREE.Group();
+      const gl=glassMat(0x7AAABB), al=realMat(0xC8D8E0,0.28,0.92);
+      const HTOT=0.270;
+      // Three Y-shaped wings, each tapering and stepping back
+      for(let i=0;i<3;i++){
+        const a=i*(Math.PI*2/3);
+        const cx=Math.cos(a)*0.010, cz=Math.sin(a)*0.010;
+        // Wing sections — 4 setbacks each narrowing
+        [[0,HTOT*0.32,0.0130,0.0110],[HTOT*0.32,HTOT*0.56,0.0110,0.0086],
+         [HTOT*0.56,HTOT*0.74,0.0086,0.0062],[HTOT*0.74,HTOT*0.88,0.0062,0.0040]
+        ].forEach(([y0,y1,w0,w1],si)=>{
+          const sh=y1-y0;
+          const box=new THREE.Mesh(new THREE.BoxGeometry(w0*(1-si*0.05),sh,w0*(0.85-si*0.05)),gl);
+          box.position.set(cx*(1-si*0.18),(y0+y1)/2,cz*(1-si*0.18));
+          box.rotation.y=a; g.add(box);
+          // Floor bands
+          for(let fy=y0; fy<y1; fy+=HTOT*0.022){
+            const fb=new THREE.Mesh(new THREE.BoxGeometry(w0*(1-si*0.05)+0.001,0.0006,w0*(0.85-si*0.05)+0.001),al);
+            fb.position.set(cx*(1-si*0.18),fy,cz*(1-si*0.18)); fb.rotation.y=a; g.add(fb);
+          }
+        });
+      }
+      // Central spire
+      [[0,HTOT*0.88,0.0055,0.0030],[HTOT*0.88,HTOT,0.0030,0.0006]].forEach(([y0,y1,r0,r1])=>{
+        const cyl=new THREE.Mesh(new THREE.CylinderGeometry(r1,r0,y1-y0,12),al);
+        cyl.position.y=(y0+y1)/2; g.add(cyl);
+      });
+      const tip=new THREE.Mesh(new THREE.CylinderGeometry(0.0002,0.0006,0.048,6),al);
+      tip.position.y=HTOT+0.024; g.add(tip);
+      return g;
+    }
+
+    // — Pyramids of Giza — Tura limestone #C8AE78
+    function buildPyramids() {
+      const g=new THREE.Group(), m=realMat(0xC8AE78,0.84,0.02);
+      [[0,0,0.034,0.068],[0.032,0.005,0.025,0.050],[-0.018,0.010,0.018,0.036]].forEach(([x,z,r,h])=>{
+        const py=new THREE.Mesh(new THREE.ConeGeometry(r,h,4),m);
+        py.position.set(x,h/2,z); py.rotation.y=Math.PI/4; g.add(py);
+      });
+      return g;
+    }
+
+    // — Big Ben — Yorkshire limestone #9A8B72, gold clock #C8A840
+    function buildBigBen() {
+      const g=new THREE.Group(), m=realMat(0x9A8B72,0.80,0.03), clock=realMat(0xC8A840,0.45,0.20);
+      const shaft=new THREE.Mesh(new THREE.BoxGeometry(0.010,0.072,0.010),m); shaft.position.set(0,0.036,0); g.add(shaft);
+      const belfry=new THREE.Mesh(new THREE.BoxGeometry(0.014,0.016,0.014),m); belfry.position.set(0,0.080,0); g.add(belfry);
+      [0,1,2,3].forEach(i=>{
+        const a=i*Math.PI/2;
+        const face=new THREE.Mesh(new THREE.CircleGeometry(0.005,12),clock);
+        face.position.set(Math.cos(a)*0.0075,0.080,Math.sin(a)*0.0075); face.rotation.y=-a; g.add(face);
+      });
+      const spire=new THREE.Mesh(new THREE.ConeGeometry(0.007,0.034,4),m); spire.position.set(0,0.105,0); spire.rotation.y=Math.PI/4; g.add(spire);
+      return g;
+    }
+
+    // — Taj Mahal — Makrana white marble #F5F0E8, onion dome LatheGeometry
+    function buildTaj() {
+      const g=new THREE.Group(), m=realMat(0xF5F0E8,0.60,0.02);
+      const plat=new THREE.Mesh(new THREE.BoxGeometry(0.052,0.005,0.052),m); plat.position.set(0,0.0025,0); g.add(plat);
+      const base=new THREE.Mesh(new THREE.BoxGeometry(0.034,0.013,0.034),m); base.position.set(0,0.012,0); g.add(base);
+      const dpts=[]; for(let i=0;i<=16;i++){const t=i/16;dpts.push(new THREE.Vector2(0.012*Math.sin(t*Math.PI)*1.25+0.002*(1-t),t*0.030));}
+      const dome=new THREE.Mesh(new THREE.LatheGeometry(dpts,16),m); dome.position.set(0,0.019,0); g.add(dome);
+      [[-0.020,-0.020],[0.020,-0.020],[-0.020,0.020],[0.020,0.020]].forEach(([x,z])=>{
+        const mn=new THREE.Mesh(new THREE.CylinderGeometry(0.0024,0.003,0.034,8),m); mn.position.set(x,0.022,z); g.add(mn);
+        const cap=new THREE.Mesh(new THREE.ConeGeometry(0.003,0.008,8),m); cap.position.set(x,0.040,z); g.add(cap);
+      });
+      return g;
+    }
+
+    // — Colosseum — travertine limestone #C0A070, elliptical ExtrudeGeometry tiers
+    function buildColosseum() {
+      const g=new THREE.Group(), m=realMat(0xC0A070,0.82,0.03);
+      [0.024,0.018,0.012].forEach((outerR,tier)=>{
+        const inner=outerR*0.76;
+        const h=0.012-tier*0.003;
+        const shape=new THREE.Shape();
+        for(let i=0;i<=64;i++){const a=(i/64)*Math.PI*2; shape.lineTo(Math.cos(a)*outerR,Math.sin(a)*outerR*0.72);}
+        shape.closePath();
+        const hole=new THREE.Path();
+        for(let i=0;i<=64;i++){const a=(i/64)*Math.PI*2; i===0?hole.moveTo(Math.cos(a)*inner,Math.sin(a)*inner*0.72):hole.lineTo(Math.cos(a)*inner,Math.sin(a)*inner*0.72);}
+        shape.holes.push(hole);
+        const wall=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:h,bevelEnabled:false}),m);
+        wall.rotation.x=-Math.PI/2; wall.position.set(0,tier*0.010+0.001,0); g.add(wall);
+      });
+      return g;
+    }
+
+    // — Sydney Opera House — white ceramic tiles #F0EEE8, sail shells
+    function buildOpera() {
+      const g=new THREE.Group();
+      const m=new THREE.MeshStandardMaterial({color:0xF0EEE8,roughness:0.52,metalness:0.02,side:THREE.DoubleSide,emissive:new THREE.Color(0xF0EEE8).multiplyScalar(0.07),emissiveIntensity:0.55});
+      const base=new THREE.Mesh(new THREE.BoxGeometry(0.048,0.003,0.022),realMat(0xD8D4CC,0.80,0.02)); base.position.set(0,0.0015,0); g.add(base);
+      // Sail vaults — partial spherical caps at increasing heights
+      [[0,0.013,0,0.011],[0.016,0.010,-0.002,0.009],[-0.014,0.009,0.002,0.008],[-0.026,0.006,0,0.006]].forEach(([x,y,z,r])=>{
+        const sh=new THREE.Mesh(new THREE.SphereGeometry(r,10,7,0,Math.PI*2,0,Math.PI*0.50),m);
+        sh.position.set(x,y,z); g.add(sh);
+      });
+      return g;
+    }
+
+    // — Statue of Liberty — verdigris copper #4A9060, granite pedestal #888878
+    function buildLiberty() {
+      const g=new THREE.Group(), gran=realMat(0x888878,0.84,0.04), copper=realMat(0x4A9060,0.58,0.12);
+      const p1=new THREE.Mesh(new THREE.BoxGeometry(0.018,0.015,0.018),gran); p1.position.set(0,0.0075,0); g.add(p1);
+      const p2=new THREE.Mesh(new THREE.BoxGeometry(0.013,0.010,0.013),gran); p2.position.set(0,0.020,0); g.add(p2);
+      const body=new THREE.Mesh(new THREE.CylinderGeometry(0.006,0.008,0.026,8),copper); body.position.set(0,0.038,0); g.add(body);
+      const head=new THREE.Mesh(new THREE.SphereGeometry(0.006,8,6),copper); head.position.set(0,0.056,0); g.add(head);
+      for(let i=0;i<7;i++){const a=i*(Math.PI*2/7);const ray=new THREE.Mesh(new THREE.ConeGeometry(0.0005,0.007,4),copper);ray.position.set(Math.cos(a)*0.006,0.062,Math.sin(a)*0.006);ray.rotation.z=-Math.cos(a)*0.5;ray.rotation.x=Math.sin(a)*0.5;g.add(ray);}
+      const arm=new THREE.Mesh(new THREE.CylinderGeometry(0.0018,0.002,0.018,5),copper); arm.position.set(0.008,0.054,0); arm.rotation.z=-0.6; g.add(arm);
+      const torch=new THREE.Mesh(new THREE.SphereGeometry(0.004,6,5),realMat(0xC8881A,0.30,0.50)); torch.position.set(0.018,0.064,0); g.add(torch);
+      return g;
+    }
+
+    // — Tokyo Tower — vermilion red #CC3311 + ivory white #EEEEEE, curved TubeGeometry
+    function buildTokyo() {
+      const g=new THREE.Group(), red=realMat(0xCC3311,0.65,0.10), white=realMat(0xEEEEEE,0.70,0.03);
+      const FOOT=0.038, H1=0.056, HTOP=0.178;
+      for(let i=0;i<4;i++){
+        const a=(i/4)*Math.PI*2+Math.PI/4;
+        const fx=Math.cos(a)*FOOT, fz=Math.sin(a)*FOOT;
+        const curve=new THREE.CatmullRomCurve3([
+          new THREE.Vector3(fx,0.001,fz),
+          new THREE.Vector3(fx*0.55,H1*0.4,fz*0.55),
+          new THREE.Vector3(Math.cos(a)*0.006,H1,Math.sin(a)*0.006),
+        ]);
+        g.add(new THREE.Mesh(new THREE.TubeGeometry(curve,8,0.0025,5),red));
+      }
+      const deck=new THREE.Mesh(new THREE.TorusGeometry(0.009,0.0018,5,20),white); deck.position.y=H1; deck.rotation.x=Math.PI/2; g.add(deck);
+      const mast=new THREE.Mesh(new THREE.CylinderGeometry(0.0014,0.005,HTOP-H1,6),red); mast.position.set(0,H1+(HTOP-H1)/2,0); g.add(mast);
+      [0.30,0.55,0.75].forEach(t=>{const y=H1+t*(HTOP-H1);const band=new THREE.Mesh(new THREE.TorusGeometry(0.002,0.0008,4,14),white);band.position.y=y;band.rotation.x=Math.PI/2;g.add(band);});
+      const needle=new THREE.Mesh(new THREE.CylinderGeometry(0.0003,0.001,0.026,5),white); needle.position.set(0,HTOP+0.013,0); g.add(needle);
+      return g;
+    }
+
+    // — Christ the Redeemer — soapstone #D0CCBE, granite hill #6A6450
+    function buildChrist() {
+      const g=new THREE.Group(), stone=realMat(0xD0CCBE,0.78,0.02), hill=realMat(0x6A6450,0.90,0.03);
+      const mt=new THREE.Mesh(new THREE.ConeGeometry(0.022,0.020,8),hill); mt.position.set(0.008,0.010,0); g.add(mt);
+      const ped=new THREE.Mesh(new THREE.BoxGeometry(0.007,0.016,0.007),stone); ped.position.set(0,0.026,0); g.add(ped);
+      const body=new THREE.Mesh(new THREE.BoxGeometry(0.005,0.032,0.005),stone); body.position.set(0,0.050,0); g.add(body);
+      const arms=new THREE.Mesh(new THREE.BoxGeometry(0.046,0.004,0.004),stone); arms.position.set(0,0.058,0); g.add(arms);
+      const head=new THREE.Mesh(new THREE.SphereGeometry(0.005,8,6),stone); head.position.set(0,0.070,0); g.add(head);
+      return g;
+    }
+
+    // — Angkor Wat — red sandstone #9A7050, quincunx prasat towers
+    function buildAngkor() {
+      const g=new THREE.Group(), m=realMat(0x9A7050,0.82,0.04);
+      [[0.042,0.007],[0.030,0.007],[0.020,0.007]].forEach(([s,h],i)=>{
+        const tier=new THREE.Mesh(new THREE.BoxGeometry(s*2,h,s*1.55),m); tier.position.set(0,i*h+h/2,0); g.add(tier);
+      });
+      const bH=0.021;
+      const cc=new THREE.Mesh(new THREE.CylinderGeometry(0.006,0.010,0.032,8),m); cc.position.set(0,bH+0.016,0); g.add(cc);
+      const ct=new THREE.Mesh(new THREE.ConeGeometry(0.009,0.018,8),m); ct.position.set(0,bH+0.040,0); g.add(ct);
+      [[-0.018,-0.012],[0.018,-0.012],[-0.018,0.012],[0.018,0.012]].forEach(([x,z])=>{
+        const t=new THREE.Mesh(new THREE.CylinderGeometry(0.004,0.006,0.020,6),m); t.position.set(x,bH+0.010,z); g.add(t);
+        const tc=new THREE.Mesh(new THREE.ConeGeometry(0.006,0.012,6),m); tc.position.set(x,bH+0.026,z); g.add(tc);
+      });
+      return g;
+    }
+
+    // — Sagrada Familia — honey stone #C8A860, 9 spires with bulbous tops
+    function buildSagrada() {
+      const g=new THREE.Group(), m=realMat(0xC8A860,0.78,0.06);
+      const nave=new THREE.Mesh(new THREE.BoxGeometry(0.038,0.022,0.018),m); nave.position.set(0,0.011,0); g.add(nave);
+      [[-0.014,0.092,0],[-0.007,0.080,0],[0,0.115,0],[0.007,0.080,0],[0.014,0.090,0],
+       [-0.014,0.058,-0.011],[0.014,0.052,-0.011],[-0.014,0.058,0.011],[0.014,0.052,0.011]].forEach(([x,h,z])=>{
+        const sp=new THREE.Mesh(new THREE.CylinderGeometry(0.0026,0.0040,h,8),m); sp.position.set(x,0.022+h/2,z); g.add(sp);
+        const bulb=new THREE.Mesh(new THREE.SphereGeometry(0.004,8,6),m); bulb.position.set(x,0.022+h+0.002,z); g.add(bulb);
+      });
+      return g;
+    }
+
+    // — Golden Gate Bridge — international orange #C84A18
+    function buildGoldenGate() {
+      const g=new THREE.Group(), m=realMat(0xC84A18,0.68,0.18);
+      const deck=new THREE.Mesh(new THREE.BoxGeometry(0.056,0.002,0.006),m); deck.position.set(0,0.020,0); g.add(deck);
+      [-0.018,0.018].forEach(x=>{
+        const tw=new THREE.Mesh(new THREE.BoxGeometry(0.004,0.044,0.004),m); tw.position.set(x,0.043,0); g.add(tw);
+        const xb=new THREE.Mesh(new THREE.BoxGeometry(0.004,0.002,0.010),m); xb.position.set(x,0.042,0); g.add(xb);
+      });
+      [-0.002,0.002].forEach(z=>{
+        const pts=[];
+        for(let i=0;i<=32;i++){const t=(i/32)*2-1;pts.push(new THREE.Vector3(t*0.028,0.065+0.026*t*t,z));}
+        g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),new THREE.LineBasicMaterial({color:0xC84A18})));
+      });
+      return g;
+    }
+
+    // — Kremlin — red brick #8A2020, gold onion domes #C8901A, LatheGeometry
+    function buildKremlin() {
+      const g=new THREE.Group(), brick=realMat(0x8A2020,0.82,0.04), gold=realMat(0xC8901A,0.28,0.62);
+      const wall=new THREE.Mesh(new THREE.BoxGeometry(0.050,0.010,0.038),brick); wall.position.set(0,0.005,0); g.add(wall);
+      [[-0.023,-0.017],[0.023,-0.017],[-0.023,0.017],[0.023,0.017]].forEach(([x,z])=>{
+        const t=new THREE.Mesh(new THREE.CylinderGeometry(0.005,0.005,0.015,8),brick); t.position.set(x,0.018,z); g.add(t);
+        const td=new THREE.Mesh(new THREE.ConeGeometry(0.006,0.010,8),brick); td.position.set(x,0.033,z); g.add(td);
+      });
+      const tw=new THREE.Mesh(new THREE.BoxGeometry(0.009,0.034,0.009),brick); tw.position.set(0,0.017,0); g.add(tw);
+      const dpts=[]; for(let i=0;i<=12;i++){const t=i/12;dpts.push(new THREE.Vector2(0.008*Math.sin(t*Math.PI)*1.1*(1-t*0.3)+0.0008,t*0.022));}
+      const onion=new THREE.Mesh(new THREE.LatheGeometry(dpts,12),gold); onion.position.set(0,0.038,0); g.add(onion);
+      const bt=new THREE.Mesh(new THREE.CylinderGeometry(0.005,0.007,0.026,8),brick); bt.position.set(0.022,0.023,0); g.add(bt);
+      const bg=new THREE.Mesh(new THREE.SphereGeometry(0.007,10,7,0,Math.PI*2,0,Math.PI*0.55),realMat(0xC8901A,0.24,0.65)); bg.scale.y=1.5; bg.position.set(0.022,0.044,0); g.add(bg);
+      return g;
+    }
+
+    // — Hagia Sophia — Byzantine stone #B8A278, lead dome #7A8070, Ottoman minarets
+    function buildHagia() {
+      const g=new THREE.Group(), stone=realMat(0xB8A278,0.80,0.04), lead=realMat(0x7A8070,0.70,0.06);
+      const base=new THREE.Mesh(new THREE.BoxGeometry(0.042,0.010,0.042),stone); base.position.set(0,0.005,0); g.add(base);
+      [0,Math.PI/2,Math.PI,Math.PI*1.5].forEach(a=>{
+        const hd=new THREE.Mesh(new THREE.SphereGeometry(0.010,8,6,0,Math.PI,0,Math.PI*0.45),stone);
+        hd.position.set(Math.cos(a)*0.010,0.015,Math.sin(a)*0.010); hd.rotation.y=-a; g.add(hd);
+      });
+      const dpts=[]; for(let i=0;i<=14;i++){const t=i/14;dpts.push(new THREE.Vector2(0.014*Math.sin(t*Math.PI*0.7+0.06),t*0.019));}
+      const dome=new THREE.Mesh(new THREE.LatheGeometry(dpts,20),lead); dome.position.set(0,0.011,0); g.add(dome);
+      [[-0.022,-0.022],[0.022,-0.022],[-0.022,0.022],[0.022,0.022]].forEach(([x,z])=>{
+        const mn=new THREE.Mesh(new THREE.CylinderGeometry(0.003,0.003,0.038,8),stone); mn.position.set(x,0.025,z); g.add(mn);
+        const tip=new THREE.Mesh(new THREE.ConeGeometry(0.003,0.013,8),lead); tip.position.set(x,0.045,z); g.add(tip);
+      });
+      return g;
+    }
+
+    // — Great Wall of China — grey stone #888070, winding wall + watchtowers
+    function buildGreatWall() {
+      const g=new THREE.Group(), m=realMat(0x888070,0.85,0.03);
+      const pts=[[-0.032,0.002,-0.004],[-0.020,0.002,0.002],[-0.009,0.002,-0.002],[0,0.002,0],[0.011,0.002,0.003],[0.022,0.002,-0.001],[0.030,0.002,-0.005]];
+      for(let i=0;i<pts.length-1;i++){
+        const [x1,,z1]=pts[i],[x2,,z2]=pts[i+1];
+        const dx=x2-x1,dz=z2-z1,len=Math.sqrt(dx*dx+dz*dz);
+        const seg=new THREE.Mesh(new THREE.BoxGeometry(len,0.007,0.005),m);
+        seg.position.set((x1+x2)/2,0.0035,(z1+z2)/2); seg.rotation.y=-Math.atan2(dz,dx); g.add(seg);
+        if(i%2===0){
+          const wt=new THREE.Mesh(new THREE.BoxGeometry(0.007,0.012,0.007),m); wt.position.set(x1,0.010,z1); g.add(wt);
+          const mt=new THREE.Mesh(new THREE.BoxGeometry(0.007,0.002,0.007),realMat(0x706858,0.88,0.02)); mt.position.set(x1,0.017,z1); g.add(mt);
+        }
+      }
+      return g;
+    }
+
+    // — Machu Picchu — Inca granite #808070, terraced ruins
+    function buildMachu() {
+      const g=new THREE.Group(), gran=realMat(0x808070,0.88,0.04), grass=realMat(0x4A6030,0.90,0.02);
+      const mt=new THREE.Mesh(new THREE.ConeGeometry(0.022,0.022,7),realMat(0x6A6050,0.90,0.03)); mt.position.set(0.010,0.011,0); g.add(mt);
+      for(let i=0;i<6;i++){
+        const mat=i%2===0?gran:grass;
+        const tier=new THREE.Mesh(new THREE.BoxGeometry(0.024-i*0.003,0.003,0.016-i*0.002),mat);
+        tier.position.set(-0.002,0.020+i*0.004,0); g.add(tier);
+      }
+      const temple=new THREE.Mesh(new THREE.CylinderGeometry(0.005,0.006,0.010,10),gran); temple.position.set(-0.004,0.052,0); g.add(temple);
+      const intih=new THREE.Mesh(new THREE.BoxGeometry(0.003,0.008,0.003),gran); intih.position.set(-0.014,0.040,0); g.add(intih);
+      return g;
+    }
+
+    // ═══════════════════════════════════════════
+    //  PLACE LANDMARKS
+    // ═══════════════════════════════════════════
+    function makeLabel(text, col) {
+      const c = document.createElement('canvas'); c.width = 640; c.height = 96;
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, 640, 96);
+      const hexStr = '#' + col.toString(16).padStart(6,'0');
+      ctx.font = 'bold 30px system-ui, sans-serif';
+      const measured = ctx.measureText(text).width;
+      const pad = 22, bw = measured + pad*2, bh = 54;
+      const bx = (640 - bw) / 2, by = (96 - bh) / 2;
+      // Solid pill background
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 12);
+      ctx.fillStyle = 'rgba(4,10,22,0.88)';
+      ctx.fill();
+      ctx.strokeStyle = hexStr; ctx.lineWidth = 2; ctx.globalAlpha = 0.7;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      // White text with colored glow
+      ctx.font = 'bold 30px system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.shadowColor = hexStr; ctx.shadowBlur = 14;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, 320, 48);
+      const tex = new THREE.CanvasTexture(c);
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false, sizeAttenuation: true }));
+      sp.renderOrder = 20;
+      sp.scale.set(0.90, 0.135, 1);
+      return sp;
+    }
+
+    // — KLCC Petronas Twin Towers — Malaysia #3.16°N, 101.71°E
+    function buildKLCC() {
+      const g = new THREE.Group();
+      // KLCC uses stainless steel cladding + tinted glass curtain wall
+      const gl  = glassMat(0x6FA8C0);           // tinted glass curtain wall
+      const ss  = realMat(0xB8C8D2, 0.22, 0.88); // brushed stainless steel
+      const conc= realMat(0xB0A898, 0.72, 0.04); // concrete podium
+      const HTOT = 0.340;  // total height including spire
+      const SEP  = 0.0175; // half-separation between tower axes
+
+      // Each tower: 16-sided cylinders (star cross-section approximated)
+      // Sections: base → main shaft → upper taper → crown → spire
+      function buildTower(ox) {
+        const tw = new THREE.Group();
+        const SEGS = 16; // 16-sided = near-circular but faceted
+        const ROT  = Math.PI / 16;
+
+        // Section layout: [yBot, yTop, rBot, rTop, mat]
+        const sections = [
+          [0,           HTOT*0.03,  0.0175, 0.0175, conc], // podium base ring
+          [HTOT*0.03,   HTOT*0.52,  0.0162, 0.0148, gl  ], // main lower shaft
+          [HTOT*0.52,   HTOT*0.72,  0.0148, 0.0120, gl  ], // first setback
+          [HTOT*0.72,   HTOT*0.84,  0.0120, 0.0088, gl  ], // second setback
+          [HTOT*0.84,   HTOT*0.89,  0.0088, 0.0060, ss  ], // transition neck
+          [HTOT*0.89,   HTOT*0.92,  0.0080, 0.0055, ss  ], // crown ring step
+        ];
+        sections.forEach(([y0,y1,r0,r1,mat])=>{
+          const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r1,r0,y1-y0,SEGS),mat);
+          cyl.rotation.y = ROT;
+          cyl.position.set(ox, (y0+y1)/2, 0);
+          tw.add(cyl);
+        });
+
+        // Horizontal floor ring bands every ~3 floors
+        const ringMat = realMat(0xD8E4EB, 0.28, 0.78);
+        const FLOOR_STEP = HTOT * 0.022;
+        for (let y = HTOT*0.03; y < HTOT*0.89; y += FLOOR_STEP) {
+          const frac = (y - HTOT*0.03) / (HTOT*0.86);
+          const r = 0.0168 - frac * 0.0108; // interpolate radius
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.00048, 3, 16), ringMat);
+          ring.rotation.x = Math.PI / 2;
+          ring.position.set(ox, y, 0);
+          tw.add(ring);
+        }
+
+        // Crown: stepped rings at top
+        [[HTOT*0.89, 0.0065, 0.00065],[HTOT*0.905, 0.0055, 0.00055],
+         [HTOT*0.92,  0.0040, 0.00045]].forEach(([y,r,t])=>{
+          const cr = new THREE.Mesh(new THREE.TorusGeometry(r,t,3,16),ss);
+          cr.rotation.x = Math.PI/2; cr.position.set(ox,y,0); tw.add(cr);
+        });
+
+        // Spire: two-part (thick base + slender tip)
+        const sp1 = new THREE.Mesh(new THREE.CylinderGeometry(0.0018,0.0032,HTOT*0.048,8),ss);
+        sp1.position.set(ox, HTOT*0.92+HTOT*0.024, 0); tw.add(sp1);
+        const sp2 = new THREE.Mesh(new THREE.CylinderGeometry(0.0003,0.0018,HTOT*0.060,6),ss);
+        sp2.position.set(ox, HTOT*0.92+HTOT*0.048+HTOT*0.030, 0); tw.add(sp2);
+        // Spire tip ball
+        const ball = new THREE.Mesh(new THREE.SphereGeometry(0.0010,6,4),ss);
+        ball.position.set(ox, HTOT*0.92+HTOT*0.048+HTOT*0.060+0.001, 0); tw.add(ball);
+
+        g.add(tw);
+      }
+
+      buildTower(-SEP);
+      buildTower( SEP);
+
+      // Sky bridge (floors 41–42, ~46% of main shaft height)
+      const bridgeY = HTOT * 0.44;
+      const bridgeSpan = SEP * 2 + 0.003;
+      const bridgeMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(bridgeSpan, 0.0055, 0.0085), ss);
+      bridgeMesh.position.set(0, bridgeY, 0); g.add(bridgeMesh);
+      // Bridge support struts (V-shaped props)
+      [-1,1].forEach(side=>{
+        const strutX = side * (SEP - 0.002);
+        const strut = new THREE.Mesh(new THREE.CylinderGeometry(0.0010,0.0015,0.018,5),ss);
+        strut.position.set(strutX, bridgeY - 0.009, 0);
+        strut.rotation.z = side * 0.3;
+        g.add(strut);
+      });
+
+      return g;
+    }
+
+    const landmarks = [
+      { name:'Eiffel Tower',        lat: 48.86, lon:   2.35, fn: buildEiffel,     col:0xE8C870, lo:0.42 },
+      { name:'Burj Khalifa',        lat: 25.20, lon:  55.27, fn: buildBurj,       col:0x88CCEE, lo:0.44 },
+      { name:'Pyramids of Giza',    lat: 29.98, lon:  31.13, fn: buildPyramids,   col:0xE8C878, lo:0.36 },
+      { name:'Big Ben',             lat: 51.50, lon:  -0.12, fn: buildBigBen,     col:0xC8D8A8, lo:0.40 },
+      { name:'Taj Mahal',           lat: 27.17, lon:  78.04, fn: buildTaj,        col:0xF0EEE0, lo:0.40 },
+      { name:'Colosseum',           lat: 41.89, lon:  12.49, fn: buildColosseum,  col:0xD4B882, lo:0.36 },
+      { name:'Sydney Opera House',  lat:-33.86, lon: 151.21, fn: buildOpera,      col:0xE8E8F0, lo:0.38 },
+      { name:'Statue of Liberty',   lat: 40.69, lon: -74.04, fn: buildLiberty,    col:0x88C8A0, lo:0.40 },
+      { name:'Tokyo Tower',         lat: 35.66, lon: 139.75, fn: buildTokyo,      col:0xEE7766, lo:0.42 },
+      { name:'Christ the Redeemer', lat:-22.95, lon: -43.21, fn: buildChrist,     col:0xE0DED8, lo:0.40 },
+      { name:'Angkor Wat',          lat: 13.41, lon: 103.87, fn: buildAngkor,     col:0xC8A882, lo:0.38 },
+      { name:'Sagrada Familia',     lat: 41.40, lon:   2.17, fn: buildSagrada,    col:0xE8C878, lo:0.42 },
+      { name:'Golden Gate Bridge',  lat: 37.82, lon:-122.48, fn: buildGoldenGate, col:0xE07050, lo:0.40 },
+      { name:'Kremlin',             lat: 55.75, lon:  37.62, fn: buildKremlin,    col:0xCC8888, lo:0.38 },
+      { name:'Hagia Sophia',        lat: 41.01, lon:  28.98, fn: buildHagia,      col:0xD8C8A8, lo:0.42 },
+      { name:'Great Wall of China', lat: 40.43, lon: 116.57, fn: buildGreatWall,  col:0xB8B0A0, lo:0.36 },
+      { name:'Machu Picchu',        lat:-13.16, lon: -72.54, fn: buildMachu,      col:0xA8A890, lo:0.38 },
+      { name:'KLCC Twin Towers',    lat:  3.16, lon: 101.71, fn: buildKLCC,       col:0x88BBDD, lo:0.46 },
+    ];
+
+    const lmGroup = new THREE.Group();
+    globe.add(lmGroup);
+
+    // Landmark data: { bldg, label, line } for hover show/hide
+    const landmarkData = [];
+
+    landmarks.forEach(({ name, lat, lon, fn, col, lo }) => {
+      const bldg = fn();
+      bldg.scale.setScalar(5.5);
+      placeAt(bldg, lat, lon, R + 0.001);
+      bldg.userData.lmIdx = landmarkData.length; // tag for raycasting
+      lmGroup.add(bldg);
+
+      landmarkData.push({ bldg, name });
+    });
+
+    // ── City light dots ─────────────────────
+    {
+      const coords = [
+        [40.7,-74],[51.5,-0.1],[48.8,2.3],[35.7,139.7],[22.3,114.2],[28.6,77.2],
+        [19.1,72.9],[31.2,121.5],[37.5,127],[55.7,37.6],[-33.9,151.2],[34,-118],
+        [52.5,13.4],[-23.5,-46.6],[1.3,103.8],[25.2,55.3],[30,31.2],[-26,28],
+        [43.7,-79.4],[59.9,30.3],[41.0,28.9],[39.9,116.4],[45.5,-73.6],[37.9,23.7],
+        [41.4,2.2],[50.0,14.5],[47.4,19.1],[52.2,21.0],[48.2,16.4],
+      ];
+      const verts = [], cols = [];
+      const cr = rng(9999);
+      coords.forEach(([lat,lon]) => {
+        const v = ll2v(lat, lon, R + 0.003);
+        verts.push(v.x, v.y, v.z);
+        const c = new THREE.Color().setHSL(0.55 + cr()*0.15, 0.9, 0.9);
+        cols.push(c.r, c.g, c.b);
+      });
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+      geo.setAttribute('color',    new THREE.Float32BufferAttribute(cols,  3));
+      globe.add(new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.022, vertexColors: true, sizeAttenuation: true })));
+    }
+
+    // ═══════════════════════════════════════════
+    //  MARINE LIFE
+    // ═══════════════════════════════════════════
+    function makeWhale() {
+      const g=new THREE.Group();
+      const m=realMat(0x2A5878,0.50,0.22), belly=realMat(0xA8C8E0,0.55,0.08);
+      // Body — elongated along X (forward direction)
+      const body=new THREE.Mesh(new THREE.SphereGeometry(0.010,10,7),m);
+      body.scale.set(4.4,1.0,1.2); g.add(body);
+      // Belly patch
+      const bp=new THREE.Mesh(new THREE.SphereGeometry(0.008,8,5,0,Math.PI*2,Math.PI*0.5,Math.PI*0.45),belly);
+      bp.scale.set(4.0,0.6,0.9); g.add(bp);
+      // Tail peduncle narrows before flukes
+      const ped=new THREE.Mesh(new THREE.SphereGeometry(0.006,6,5),m);
+      ped.scale.set(1.6,0.55,0.65); ped.position.set(-0.042,0,0); g.add(ped);
+      // Tail flukes in their own group so they can be animated (flapped up/down)
+      const tailGroup=new THREE.Group();
+      tailGroup.position.set(-0.050,0,0);
+      [-1,1].forEach(s=>{
+        const f=new THREE.Mesh(new THREE.ConeGeometry(0.007,0.020,3),m);
+        // Flukes spread left/right, swept slightly back
+        f.rotation.z=-Math.PI/2; f.rotation.y=s*0.5;
+        f.position.set(-0.002,-0.002,s*0.011); tailGroup.add(f);
+      });
+      g.add(tailGroup);
+      // Pectoral fins
+      [-1,1].forEach(s=>{
+        const f=new THREE.Mesh(new THREE.ConeGeometry(0.005,0.020,4),m);
+        f.position.set(0.010,-0.008,s*0.014); f.rotation.z=0.65; f.rotation.x=-s*0.35; g.add(f);
+      });
+      // Dorsal fin (small hump)
+      const dors=new THREE.Mesh(new THREE.ConeGeometry(0.003,0.012,4),m);
+      dors.position.set(-0.010,0.013,0); g.add(dors);
+      // Water spout
+      const spout=new THREE.Mesh(new THREE.ConeGeometry(0.0018,0.014,5),realMat(0xD0EEFF,0.25,0.0));
+      spout.position.set(0.024,0.013,0); g.add(spout);
+      // Store refs for animation
+      g.userData.tailGroup=tailGroup;
+      g.userData.swimPhase=Math.random()*Math.PI*2;
+      return g;
+    }
+
+    function makeShark() {
+      const g=new THREE.Group();
+      const m=realMat(0x708898,0.52,0.28), belly=realMat(0xE0E8E8,0.58,0.06);
+      // Body
+      const body=new THREE.Mesh(new THREE.SphereGeometry(0.008,9,6),m);
+      body.scale.set(4.0,0.82,0.95); g.add(body);
+      const bp=new THREE.Mesh(new THREE.SphereGeometry(0.006,7,4,0,Math.PI*2,Math.PI*0.55,Math.PI*0.38),belly);
+      bp.scale.set(3.4,0.6,0.8); g.add(bp);
+      // Dorsal fin — iconic triangle pointing up
+      const dors=new THREE.Mesh(new THREE.ConeGeometry(0.004,0.018,3),m);
+      dors.position.set(0.004,0.018,0); g.add(dors);
+      // Tail
+      const tail=new THREE.Mesh(new THREE.ConeGeometry(0.006,0.014,3),m);
+      tail.position.set(-0.036,0.003,0); tail.rotation.z=Math.PI/2; g.add(tail);
+      // Pectoral fins
+      [-1,1].forEach(s=>{
+        const f=new THREE.Mesh(new THREE.ConeGeometry(0.004,0.014,4),m);
+        f.position.set(0.004,-0.006,s*0.012); f.rotation.z=0.65; f.rotation.x=-s*0.25; g.add(f);
+      });
+      return g;
+    }
+
+    function makeFishSchool() {
+      const g=new THREE.Group();
+      const fishCols=[0xF4A030,0xFF5530,0x20B0D8,0xF0C020,0xD060C0,0x40C060];
+      const fr=rng(55555+Math.floor(Math.random()*9999));
+      for(let i=0;i<12;i++){
+        const mat=realMat(fishCols[i%fishCols.length],0.42,0.38);
+        const fish=new THREE.Group();
+        const body=new THREE.Mesh(new THREE.SphereGeometry(0.003,6,4),mat);
+        body.scale.set(2.6,0.68,0.68); fish.add(body);
+        const tail=new THREE.Mesh(new THREE.ConeGeometry(0.0028,0.007,3),mat);
+        tail.position.set(-0.010,0,0); tail.rotation.z=Math.PI/2; fish.add(tail);
+        fish.position.set((fr()-0.5)*0.048,(fr()-0.5)*0.008,(fr()-0.5)*0.048);
+        g.add(fish);
+      }
+      return g;
+    }
+
+    // Orbit animation helper
+    const marineList = [];
+    const _mFwd=new THREE.Vector3(), _mUp=new THREE.Vector3(), _mRt=new THREE.Vector3(), _mM4=new THREE.Matrix4();
+    const _pitchQ=new THREE.Quaternion(), _pitchAxis=new THREE.Vector3(0,0,1);
+    function addMarine(mesh, inclDeg, lonDeg, speed, scale, startAngle=0) {
+      mesh.scale.setScalar(scale);
+      globe.add(mesh);
+      const inc=inclDeg*Math.PI/180, lon=lonDeg*Math.PI/180;
+      const u=new THREE.Vector3(Math.cos(lon)*Math.cos(inc), Math.sin(inc), Math.sin(lon)*Math.cos(inc)).normalize();
+      const v=new THREE.Vector3(-Math.sin(lon), 0, Math.cos(lon)).normalize();
+      marineList.push({ mesh, u, v, baseR: R+0.006, r: R+0.006, speed, angle: startAngle });
+    }
+
+    // Pacific blue whales — deep Pacific, low inclination = stay in ocean
+    addMarine(makeWhale(),   8, 170,  0.0040, 6.0,  0.0);
+    addMarine(makeWhale(), -18,-140,  0.0032, 5.5,  Math.PI);
+    // Mid-Atlantic + Indian Ocean whales
+    addMarine(makeWhale(),  12, -38,  0.0028, 5.5,  Math.PI*0.5);
+    addMarine(makeWhale(), -12,  72,  0.0035, 5.8,  Math.PI*1.3);
+    // Sharks — tropical waters
+    addMarine(makeShark(),  12, 280,  0.0072, 5.8,  Math.PI*0.2);
+    addMarine(makeShark(), -10,  80,  0.0065, 5.5,  Math.PI*0.8);
+    addMarine(makeShark(),  20, 130,  0.0078, 5.5,  Math.PI*1.5);
+    // Fish schools
+    addMarine(makeFishSchool(),  5, 300, 0.0090, 5.2, 0.0);
+    addMarine(makeFishSchool(), -28, 120, 0.0068, 5.0, Math.PI*0.6);
+    addMarine(makeFishSchool(),  35, -80, 0.0058, 4.8, Math.PI*1.2);
+    addMarine(makeFishSchool(), -5,  -10, 0.0075, 5.0, Math.PI*1.8);
+
+    // ── Dolphins with breach animation ────────
+    function makeDolphin() {
+      const g=new THREE.Group();
+      const m=realMat(0x5090B8,0.46,0.28), belly=realMat(0xD8EEF5,0.55,0.05);
+      const body=new THREE.Mesh(new THREE.SphereGeometry(0.006,8,5),m);
+      body.scale.set(3.8,0.85,0.90); g.add(body);
+      const bp=new THREE.Mesh(new THREE.SphereGeometry(0.004,6,4,0,Math.PI*2,Math.PI*0.5,Math.PI*0.4),belly);
+      bp.scale.set(3.2,0.55,0.75); g.add(bp);
+      // Dorsal fin
+      const dors=new THREE.Mesh(new THREE.ConeGeometry(0.003,0.012,3),m);
+      dors.position.set(0.002,0.012,0); g.add(dors);
+      // Tail flukes
+      [-1,1].forEach(s=>{
+        const f=new THREE.Mesh(new THREE.ConeGeometry(0.004,0.010,3),m);
+        f.position.set(-0.026,0.002,s*0.007); f.rotation.z=-Math.PI/2; f.rotation.y=s*0.4; g.add(f);
+      });
+      // Rostrum / beak
+      const beak=new THREE.Mesh(new THREE.CylinderGeometry(0.0015,0.003,0.012,5),m);
+      beak.rotation.z=Math.PI/2; beak.position.set(0.026,0.002,0); g.add(beak);
+      return g;
+    }
+    function makeDolphinPod() {
+      const g=new THREE.Group();
+      const dr=rng(22222);
+      for(let i=0;i<4;i++){
+        const d=makeDolphin();
+        const bx=(dr()-0.5)*0.065, by=(dr()-0.5)*0.008, bz=(dr()-0.5)*0.040;
+        d.position.set(bx, by, bz);
+        d.userData.breachPhase = dr()*Math.PI*2;
+        d.userData.baseY = by;
+        g.add(d);
+      }
+      g.userData.isPod = true;
+      return g;
+    }
+    // Pacific & Atlantic dolphin pods
+    addMarine(makeDolphinPod(),  4, 180, 0.0088, 5.4, 0.0);    // Central Pacific, near-equatorial
+    addMarine(makeDolphinPod(), -5, 330, 0.0072, 5.2, Math.PI);  // South Atlantic equatorial
+    addMarine(makeDolphinPod(),  6,  75, 0.0065, 5.0, Math.PI*0.7); // Indian Ocean equatorial
+
+    // ── Polar bears on ice ────────────────────
+    function makePolarBear() {
+      const g = new THREE.Group();
+      const m = realMat(0xF5F2EE, 0.92, 0.02);
+      // Body
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.008,7,5), m);
+      body.scale.set(1.85,1.0,1.05); body.position.set(0,0.006,0); g.add(body);
+      // Head
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.005,6,5), m);
+      head.position.set(0.013,0.010,0); g.add(head);
+      // Snout
+      const snout = new THREE.Mesh(new THREE.SphereGeometry(0.003,5,4), m);
+      snout.scale.set(1.3,0.75,0.75); snout.position.set(0.017,0.008,0); g.add(snout);
+      // Ears
+      [-1,1].forEach(s=>{
+        const ear=new THREE.Mesh(new THREE.SphereGeometry(0.0018,4,3),m);
+        ear.position.set(0.012,0.015,s*0.004); g.add(ear);
+      });
+      // Legs (4)
+      [[0.007,-0.004,0.007],[0.007,-0.004,-0.007],[-0.005,-0.004,0.007],[-0.005,-0.004,-0.007]].forEach(([lx,ly,lz])=>{
+        const leg=new THREE.Mesh(new THREE.CylinderGeometry(0.0018,0.0014,0.009,5),m);
+        leg.position.set(lx,ly,lz); g.add(leg);
+      });
+      // Stubby tail
+      const tail=new THREE.Mesh(new THREE.SphereGeometry(0.0014,4,3),m);
+      tail.position.set(-0.013,0.007,0); g.add(tail);
+      return g;
+    }
+    const bearList = [];
+    // Arctic bears (lat ~72-80°N)
+    [[74,-80,0.0009],[76,20,0.0007],[73,100,0.0008],[78,-40,0.0006],
+    // Antarctic bears (lat ~-70 to -78°S) — emperor penguins territory but artistic license
+     [-72,30,0.0008],[-74,-60,0.0007],[-70,120,0.0009],[-76,-20,0.0006]
+    ].forEach(([lat,lon,speed],i)=>{
+      const b = makePolarBear();
+      b.scale.setScalar(4.2);
+      globe.add(b);
+      bearList.push({ mesh:b, lat, lon:lon*Math.PI/180, speed, phase:i*Math.PI/4 });
+    });
+
+
+    // ── Icebergs near poles ───────────────────
+    {
+      const iceMat2=new THREE.MeshStandardMaterial({
+        color:0xDDF5FF, roughness:0.38, metalness:0.18,
+        emissive:new THREE.Color(0.10,0.18,0.28), emissiveIntensity:0.9
+      });
+      const ir=rng(98765);
+      // Arctic bergs
+      [[72,-80],[75,10],[70,32],[68,-138],[73,105],[78,-50],[66,60]].forEach(([lat,lon])=>{
+        const g=new THREE.Group();
+        const main=new THREE.Mesh(new THREE.IcosahedronGeometry(0.009,0),iceMat2);
+        main.scale.set(1.5+ir()*0.9, 0.45+ir()*0.45, 1.2+ir()*0.8);
+        main.position.y=0.003; g.add(main);
+        const sec=new THREE.Mesh(new THREE.IcosahedronGeometry(0.005,0),iceMat2);
+        sec.position.set(0.007,0.007,0.004); g.add(sec);
+        placeAt(g, lat, lon, R+0.001);
+        g.scale.setScalar(3.8);
+        globe.add(g);
+      });
+      // Antarctic bergs
+      [[-68,-60],[-72,30],[-70,105],[-65,-158],[-74,-20],[-69,150],[-76,60]].forEach(([lat,lon])=>{
+        const g=new THREE.Group();
+        const main=new THREE.Mesh(new THREE.IcosahedronGeometry(0.010,0),iceMat2);
+        main.scale.set(1.8+ir()*1.0, 0.40+ir()*0.50, 1.5+ir()*0.9);
+        main.position.y=0.003; g.add(main);
+        const sec=new THREE.Mesh(new THREE.IcosahedronGeometry(0.006,0),iceMat2);
+        sec.position.set(0.008,0.008,0.005); g.add(sec);
+        placeAt(g, lat, lon, R+0.001);
+        g.scale.setScalar(4.0);
+        globe.add(g);
+      });
+    }
+
+    // (wave rings removed — only orange country markers pulse)
+
+    // ── ISS Orbiting ──────────────────────────
+    function makeISS() {
+      const g = new THREE.Group();
+      const bodyM = realMat(0xCCDDEE, 0.45, 0.85);
+      const panelM = realMat(0x334466, 0.3, 0.7);
+      // Central truss body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.020, 0.005, 0.005), bodyM);
+      g.add(body);
+      // Solar panel arrays (2 pairs)
+      [-1, 1].forEach(s => {
+        const truss = new THREE.Mesh(new THREE.BoxGeometry(0.003, 0.003, 0.040), bodyM);
+        truss.position.set(s * 0.010, 0, 0); g.add(truss);
+        [-1, 1].forEach(ss => {
+          const panel = new THREE.Mesh(new THREE.BoxGeometry(0.002, 0.014, 0.016), panelM);
+          panel.position.set(s * 0.010, 0, ss * 0.022); g.add(panel);
+        });
+      });
+      return g;
+    }
+    const iss = makeISS();
+    iss.scale.setScalar(5.5);
+    globe.add(iss);
+    const issOrbit = {
+      r: R + 0.32, angle: 0, speed: 0.018,
+      u: new THREE.Vector3(1, 0, 0),
+      v: new THREE.Vector3(0, Math.cos(51.6 * Math.PI / 180), Math.sin(51.6 * Math.PI / 180))
+    };
+
+    // ═══════════════════════════════════════════
+    //  ANIMATE
+    // ═══════════════════════════════════════════
+    // ── Country click zoom state ──────────────
+    let globeRotPaused = false;
+    let zoomTween = null;
+    let globeSpinTween = null;
+
+    function zoomCamera(targetDist, dur=55) {
+      zoomTween = {
+        startPos: camera.position.clone(),
+        endPos: camera.position.clone().normalize().multiplyScalar(targetDist),
+        t: 0, dur
+      };
+      controls.enabled = false;
+    }
+
+    // Spin globe so that the lat/lon faces the camera (+Z direction)
+    function spinGlobeToCountry(lat, lon) {
+      const theta = (lon + 180) * Math.PI / 180;
+      // Target globe.rotation.y so the country faces +Z (camera direction)
+      const targetY = Math.PI / 2 - theta;
+      // Shortest angular path from current rotation
+      let cur = globe.rotation.y;
+      let diff = ((targetY - cur) % (Math.PI*2) + Math.PI*3) % (Math.PI*2) - Math.PI;
+      globeSpinTween = { startY: cur, endY: cur + diff, t: 0, dur: 65 };
+    }
+
+    // ── Parachutist system ────────────────────────
+    function makeParachutist() {
+      const g = new THREE.Group();
+      // Canopy — 8 alternating panels (red/white)
+      const nP = 8;
+      for (let i = 0; i < nP; i++) {
+        const panMat = new THREE.MeshStandardMaterial({
+          color: i%2===0 ? 0xFF4422 : 0xFFFFFF, roughness:0.85, metalness:0.0, side:THREE.DoubleSide
+        });
+        const pGeo = new THREE.SphereGeometry(0.028, 4, 8, i*Math.PI*2/nP, Math.PI*2/nP, 0, Math.PI*0.52);
+        const panel = new THREE.Mesh(pGeo, panMat);
+        panel.rotation.x = Math.PI; // open side down
+        g.add(panel);
+      }
+      // Suspension lines
+      const lv = [];
+      for (let i = 0; i < nP; i++) {
+        const a = i*Math.PI*2/nP;
+        lv.push(Math.cos(a)*0.022, -0.001, Math.sin(a)*0.022, 0, -0.048, 0);
+      }
+      g.add(new THREE.LineSegments(
+        new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(lv,3)),
+        new THREE.LineBasicMaterial({color:0xCCCCCC})
+      ));
+      // Human
+      const bodyMat = new THREE.MeshStandardMaterial({color:0x1133BB, roughness:0.85, metalness:0.0});
+      const skinMat = new THREE.MeshStandardMaterial({color:0xFFBB88, roughness:0.85, metalness:0.0});
+      const helmMat = new THREE.MeshStandardMaterial({color:0xFF8800, roughness:0.6, metalness:0.1});
+      const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.0058,0.018,3,8), bodyMat);
+      torso.position.y = -0.060; g.add(torso);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.0068,8,6), skinMat);
+      head.position.y = -0.043; g.add(head);
+      const helm = new THREE.Mesh(new THREE.SphereGeometry(0.0076,8,5,0,Math.PI*2,0,Math.PI*0.58), helmMat);
+      helm.position.y = -0.042; g.add(helm);
+      [-1,1].forEach(s => {
+        const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.0024,0.016,3,5), bodyMat);
+        arm.rotation.z = s*1.15; arm.position.set(s*0.012,-0.063,0); g.add(arm);
+        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.0026,0.019,3,5), bodyMat);
+        leg.rotation.z = s*0.18; leg.position.set(s*0.004,-0.079,0); g.add(leg);
+      });
+      return g;
+    }
+
+    let _zoomOutBtn = null;
+    function showZoomOutBtn() {
+      if (_zoomOutBtn) _zoomOutBtn.remove();
+      _zoomOutBtn = document.createElement('button');
+      _zoomOutBtn.textContent = '🌍 Zoom Back Out';
+      _zoomOutBtn.style.cssText = `
+        position:fixed;bottom:36px;right:32px;
+        background:rgba(30,60,120,0.92);color:#fff;
+        font:bold 14px system-ui,sans-serif;
+        padding:11px 22px;border-radius:12px;border:1px solid rgba(100,180,255,0.4);
+        cursor:pointer;z-index:400;backdrop-filter:blur(8px);
+        box-shadow:0 4px 18px rgba(0,0,0,0.4);
+        transition:background 0.2s;`;
+      _zoomOutBtn.onmouseenter = ()=>{ _zoomOutBtn.style.background='rgba(50,100,200,0.95)'; };
+      _zoomOutBtn.onmouseleave = ()=>{ _zoomOutBtn.style.background='rgba(30,60,120,0.92)'; };
+      _zoomOutBtn.onclick = () => {
+        _zoomOutBtn.remove(); _zoomOutBtn = null;
+        controls.enabled = true;
+        globeRotPaused = false;
+        zoomCamera(5.5, 55);
+      };
+      document.body.appendChild(_zoomOutBtn);
+    }
+
+    function showToast(msg, color='rgba(220,50,50,0.92)') {
+      const t = document.createElement('div');
+      t.style.cssText = `position:fixed;bottom:40px;left:50%;transform:translateX(-50%);
+        background:${color};color:#fff;font:bold 15px system-ui,sans-serif;
+        padding:13px 26px;border-radius:12px;z-index:400;pointer-events:none;
+        border:1px solid rgba(255,255,255,0.2);backdrop-filter:blur(8px);
+        transition:opacity 0.5s;white-space:nowrap;`;
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(()=>{t.style.opacity='0';}, 2200);
+      setTimeout(()=>{t.remove();}, 2700);
+    }
+
+    let parachuteState = null;
+    const deadBodies = [];
+
+    // Funny dead body — X eyes, arms/legs splayed, deflated chute, skull emoji
+    function makeDeadBody() {
+      const g = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({color:0x1133BB, roughness:0.9, metalness:0.0});
+      const skinMat = new THREE.MeshStandardMaterial({color:0xFFBB88, roughness:0.9, metalness:0.0});
+      // Torso lying flat along Z
+      const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.006,0.018,3,8), bodyMat);
+      torso.rotation.x = Math.PI/2; g.add(torso);
+      // Head at front
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.0072,8,6), skinMat);
+      head.position.z = 0.020; g.add(head);
+      // X eyes sprite
+      const ec = document.createElement('canvas'); ec.width=64; ec.height=32;
+      const ectx = ec.getContext('2d');
+      ectx.font = 'bold 24px sans-serif'; ectx.fillStyle='#222';
+      ectx.textAlign='center'; ectx.textBaseline='middle';
+      ectx.fillText('✕   ✕', 32, 16);
+      const eySp = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(ec),transparent:true,depthWrite:false}));
+      eySp.scale.set(0.013,0.006,1); eySp.position.set(0,0.0015,0.0205); g.add(eySp);
+      // Arms spread (X shape)
+      [-1,1].forEach(s=>{
+        const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.0024,0.020,3,5), bodyMat);
+        arm.rotation.z = Math.PI/2; arm.position.set(s*0.016,0,0.010); g.add(arm);
+      });
+      // Legs spread
+      [-1,1].forEach(s=>{
+        const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.0026,0.022,3,5), bodyMat);
+        leg.rotation.x = Math.PI/2; leg.rotation.z = s*0.4;
+        leg.position.set(s*0.009,0,-0.016); g.add(leg);
+      });
+      // Deflated parachute crumpled nearby — flat squished dome panels
+      const cMat0 = new THREE.MeshStandardMaterial({color:0xFF4422,roughness:0.9,side:THREE.DoubleSide});
+      const cMat1 = new THREE.MeshStandardMaterial({color:0xFFFFFF,roughness:0.9,side:THREE.DoubleSide});
+      for(let i=0;i<8;i++){
+        const p = new THREE.Mesh(new THREE.SphereGeometry(0.020,3,3,i*Math.PI*2/8,Math.PI*2/8,0,Math.PI*0.35), i%2===0?cMat0:cMat1);
+        p.scale.y = 0.08; p.position.set(-0.018+Math.cos(i)*0.003,0.0003,-0.012+Math.sin(i)*0.003);
+        g.add(p);
+      }
+      // Skull emoji floating above
+      const sc2 = document.createElement('canvas'); sc2.width=64; sc2.height=64;
+      const sc2x = sc2.getContext('2d');
+      sc2x.font='52px serif'; sc2x.textAlign='center'; sc2x.textBaseline='middle';
+      sc2x.fillText('💀',32,34);
+      const skSp = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(sc2),transparent:true,depthWrite:false}));
+      skSp.scale.set(0.045,0.045,1); skSp.position.set(0,0.048,0.020); g.add(skSp);
+      return g;
+    }
+
+    function launchParachutist(lat, lon, type) {
+      // Remove any existing parachutist
+      if (parachuteState) { globe.remove(parachuteState.mesh); parachuteState = null; }
+      const mesh = makeParachutist();
+      mesh.scale.setScalar(3.5);
+      const startPos = ll2v(lat, lon, R + 2.2);
+      const endPos   = ll2v(lat, lon, R + 0.018);
+      const normal   = endPos.clone().normalize();
+      mesh.position.copy(startPos);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), normal);
+      globe.add(mesh);
+      parachuteState = { mesh, startPos, endPos, normal, startTime:Date.now(), duration:3200, type, phase:'falling', deathStart:0, followCam:false };
+    }
+
+    // ── Weather / celebration animation — 2D canvas overlay ──────────────────────
+    let weatherAnim = null;
+
+    function stopWeather() {
+      if (!weatherAnim) return;
+      weatherAnim = null;
+      const wc = document.getElementById('weatherCanvas');
+      if (wc) wc.getContext('2d').clearRect(0, 0, wc.width, wc.height);
+    }
+
+    function startMoneyRain(lat, lon) {
+      stopWeather();
+      const N = 40;
+      const sw = W(), sh = H();
+      const particles = [];
+      for (let i = 0; i < N; i++) {
+        const x = Math.random() * sw;
+        const y = -80 - Math.random() * 300;
+        particles.push({
+          x, y, y_reset: y,
+          vx: (Math.random() - 0.5) * 1.2,
+          vy: 2.0 + Math.random() * 2.5,
+          rot: Math.random() * Math.PI * 2,
+          rotSpeed: (Math.random() - 0.5) * 0.09,
+          w: 56 + Math.random() * 24, h: 34 + Math.random() * 14,
+          phase: Math.random() * Math.PI * 2,
+          swayAmp: 0.8 + Math.random() * 2.0,
+        });
+      }
+      weatherAnim = { type:'money', particles, lat, lon, startTime:Date.now(), duration:7000 };
+    }
+
+    function startRain(lat, lon) {
+      stopWeather();
+      const N = 130;
+      const sw = W(), sh = H();
+      const particles = [];
+      for (let i = 0; i < N; i++) {
+        const x = Math.random() * sw;
+        const y = -30 - Math.random() * sh;
+        particles.push({
+          x, y, y_reset: y,
+          vy: 5 + Math.random() * 7,
+          len: 12 + Math.random() * 24,
+        });
+      }
+      weatherAnim = { type:'rain', particles, lat, lon, startTime:Date.now(), duration:7000 };
+    }
+
+    const markerData = []; // populated after animate() is first called
+    const shootingStars = [];
+    let tick = 0;
+    function animate() {
+      requestAnimationFrame(animate);
+      tick += 0.016;
+      if (!globeRotPaused) globe.rotation.y += 0.0014;
+
+      // Globe spin tween — rotate to face clicked country
+      if (globeSpinTween) {
+        globeSpinTween.t++;
+        const p = Math.min(1, globeSpinTween.t / globeSpinTween.dur);
+        const ease = 1 - Math.pow(1 - p, 4); // easeOutQuart
+        globe.rotation.y = globeSpinTween.startY + (globeSpinTween.endY - globeSpinTween.startY) * ease;
+        if (globeSpinTween.t >= globeSpinTween.dur) {
+          const cb = globeSpinTween.onComplete;
+          globeSpinTween = null;
+          if (cb) cb();
+        }
+      }
+
+      // Pulse calc country border
+      if (calcBorderLine) {
+        const pulse = 0.5 + 0.5 * Math.sin(tick * 3);
+        calcBorderLine.userData.lineMat.opacity = 0.6 + 0.4 * pulse;
+        calcBorderLine.userData.glowMat.opacity = 0.15 + 0.25 * pulse;
+        calcBorderLine.userData.fillMat.opacity = 0.08 + 0.14 * pulse;
+      }
+
+      // Pulse home country highlight + building glow
+      if (homeHighlight) {
+        const hp  = 0.5 + 0.5 * Math.sin(tick * 4);
+        const hp2 = 0.5 + 0.5 * Math.sin(tick * 4 + 1.5);
+        homeHighlight.userData.r1.opacity      = 0.8 + 0.2  * hp;
+        homeHighlight.userData.r2.opacity      = 0.35 + 0.4 * hp;
+        homeHighlight.userData.r3.opacity      = 0.08 + 0.38 * hp2;
+        homeHighlight.userData.beamMat.opacity = 0.35 + 0.45 * hp;
+        homeHighlight.userData.ring3mesh.scale.setScalar(1 + 0.45 * hp2);
+        // Pulse building glow emissive intensity
+        if (homeHighlight.userData.homeBldgMats) {
+          const gp = 0.6 + 0.4 * Math.sin(tick * 3.5);
+          homeHighlight.userData.homeBldgMats.forEach(({ glow }) => {
+            glow.emissiveIntensity = 0.8 + 1.0 * gp;
+          });
+        }
+      }
+
+      // Animate plane along arc
+      if (flightDot && flightArcPts.length > 1) {
+        flightArcT = (flightArcT + 0.004) % 1;
+        const raw = flightArcT * (flightArcPts.length - 1);
+        const i0  = Math.floor(raw);
+        const i1  = Math.min(i0 + 1, flightArcPts.length - 1);
+        flightDot.position.lerpVectors(flightArcPts[i0], flightArcPts[i1], raw - i0);
+      }
+
+      // Camera zoom tween — easeOutExpo for cinematic feel
+      if (zoomTween) {
+        zoomTween.t++;
+        const p = Math.min(1, zoomTween.t / zoomTween.dur);
+        const ease = p === 1 ? 1 : 1 - Math.pow(2, -10 * p); // easeOutExpo
+        camera.position.lerpVectors(zoomTween.startPos, zoomTween.endPos, ease);
+        camera.lookAt(0, 0, 0);
+        if (zoomTween.t >= zoomTween.dur) {
+          zoomTween = null;
+          if (!(parachuteState && parachuteState.followCam)) {
+            // Sync OrbitControls internal state to the new camera position
+            // before re-enabling so it doesn't snap back
+            controls.enabled = true;
+            controls.target.set(0, 0, 0);
+            controls.minDistance = 2.2;
+            controls.maxDistance = 10;
+            // Force internal spherical recalc from current camera position
+            controls.enabled = false;
+            controls.enabled = true;
+          }
+        }
+      }
+
+      // Ocean gentle pulse (light refraction shimmer)
+      ocean.material.emissiveIntensity = 0.62 + Math.sin(tick * 0.7) * 0.10 + Math.sin(tick * 1.3) * 0.06;
+
+
+      // Animate marine creatures along orbital paths
+      marineList.forEach(c => {
+        c.angle += c.speed;
+        // Position
+        const pos = new THREE.Vector3()
+          .addScaledVector(c.u, Math.cos(c.angle) * c.r)
+          .addScaledVector(c.v, Math.sin(c.angle) * c.r);
+        // Tangent (swimming direction)
+        _mFwd.set(0,0,0)
+          .addScaledVector(c.u, -Math.sin(c.angle))
+          .addScaledVector(c.v,  Math.cos(c.angle))
+          .normalize();
+        // Surface normal
+        _mUp.copy(pos).normalize();
+        // Right
+        _mRt.crossVectors(_mUp, _mFwd).normalize();
+        // Reorthogonalize forward
+        _mFwd.crossVectors(_mRt, _mUp).normalize();
+        // Build orientation matrix: X=forward, Y=up(outward), Z=right
+        _mM4.makeBasis(_mFwd, _mUp, _mRt);
+        c.mesh.quaternion.setFromRotationMatrix(_mM4);
+        c.mesh.position.copy(pos);
+
+        // Whale: realistic swimming — tail flap, surfacing, body roll + pitch
+        if (c.mesh.userData.tailGroup) {
+          c.mesh.userData.swimPhase += 0.065;
+          const sp = c.mesh.userData.swimPhase;
+
+          // Tail flukes flap up/down — strong power stroke
+          c.mesh.userData.tailGroup.rotation.z = Math.sin(sp) * 0.45;
+
+          // Periodic surfacing: whale rises to breathe every ~100 frames
+          // surfacePhase cycles slowly; when near 0 the whale is at surface
+          const surfaceWave = Math.sin(sp * 0.18);
+          c.r = c.baseR + Math.max(0, surfaceWave) * 0.022;
+
+          // Body pitch: nose tilts up on ascent, down on dive
+          const pitchAmt = surfaceWave * 0.18 + Math.sin(sp * 0.5) * 0.07;
+          _pitchQ.setFromAxisAngle(_pitchAxis, pitchAmt);
+          c.mesh.quaternion.multiply(_pitchQ);
+
+          // Gentle body roll (side-to-side) as whale swims — subtle banking
+          const rollAxis = new THREE.Vector3(1, 0, 0); // forward axis = roll
+          const rollQ = new THREE.Quaternion().setFromAxisAngle(rollAxis, Math.sin(sp * 0.35 + 0.8) * 0.12);
+          c.mesh.quaternion.multiply(rollQ);
+        }
+
+        // Dolphin pod: animate individual breach jumps
+        if (c.mesh.userData.isPod) {
+          c.mesh.children.forEach(child => {
+            child.userData.breachPhase += 0.048;
+            const breach = Math.max(0, Math.sin(child.userData.breachPhase)) * 0.022;
+            child.position.y = child.userData.baseY + breach;
+          });
+        }
+      });
+
+      // Polar bears — walk in circles on ice
+      bearList.forEach(b => {
+        b.lon += b.speed;
+        const pos = ll2v(b.lat, b.lon * 180 / Math.PI, R + 0.009);
+        b.mesh.position.copy(pos);
+        // Face direction of travel (eastward)
+        const next = ll2v(b.lat, (b.lon + b.speed * 8) * 180 / Math.PI, R + 0.009);
+        const fwd = next.clone().sub(pos).normalize();
+        const up = pos.clone().normalize();
+        const rt = new THREE.Vector3().crossVectors(up, fwd).normalize();
+        fwd.crossVectors(rt, up).normalize();
+        b.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(fwd, up, rt));
+      });
+
+      // Pulse country markers
+      markerData.forEach(m => {
+        m.t += 0.045;
+        // Inner ring: scale out and fade
+        const p1 = (Math.sin(m.t) * 0.5 + 0.5);
+        m.ring.scale.setScalar(1 + p1 * 2.2);
+        m.ringMat.opacity = 0.85 * (1 - p1 * 0.85);
+        // Outer ring: offset phase
+        const p2 = (Math.sin(m.t - 1.2) * 0.5 + 0.5);
+        m.ring2.scale.setScalar(1 + p2 * 3.5);
+        m.ring2Mat.opacity = 0.5 * (1 - p2 * 0.92);
+        // Dot: gentle breathe
+        const dotS = 1 + Math.sin(m.t * 1.5) * 0.18;
+        m.dot.scale.setScalar(dotS);
+      });
+
+      // Clouds drift
+      if (clouds) clouds.rotation.y += 0.00055;
+
+      // Aurora animation
+      if (auroraMat) auroraMat.uniforms.time.value += 0.012;
+
+      // ISS orbital animation
+      issOrbit.angle += issOrbit.speed;
+      {
+        const issPos = new THREE.Vector3()
+          .addScaledVector(issOrbit.u, Math.cos(issOrbit.angle) * issOrbit.r)
+          .addScaledVector(issOrbit.v, Math.sin(issOrbit.angle) * issOrbit.r);
+        iss.position.copy(issPos);
+        iss.lookAt(new THREE.Vector3(0, 0, 0));
+      }
+
+
+      // Shooting stars
+      if (Math.random() < 0.007) {
+        const mat = new THREE.LineBasicMaterial({ color: 0xFFFFFF, transparent: true, opacity: 0.95 });
+        const theta2 = Math.random() * Math.PI * 2, phi2 = Math.random() * Math.PI;
+        const start = new THREE.Vector3(
+          Math.sin(phi2) * Math.cos(theta2),
+          Math.cos(phi2),
+          Math.sin(phi2) * Math.sin(theta2)
+        ).multiplyScalar(18 + Math.random() * 15);
+        const vel = new THREE.Vector3(
+          (Math.random() - 0.5),
+          (Math.random() - 0.5) * 0.3,
+          (Math.random() - 0.5)
+        ).normalize().multiplyScalar(0.7);
+        const geo = new THREE.BufferGeometry().setFromPoints([start.clone(), start.clone()]);
+        const line = new THREE.Line(geo, mat);
+        scene.add(line);
+        shootingStars.push({ line, mat, geo, pos: start.clone(), vel, age: 0, life: 40 + Math.random() * 25 });
+      }
+      for (let i = shootingStars.length - 1; i >= 0; i--) {
+        const ss = shootingStars[i];
+        ss.age++;
+        ss.pos.add(ss.vel);
+        const tail = ss.pos.clone().sub(ss.vel.clone().multiplyScalar(6));
+        const arr = ss.geo.attributes.position.array;
+        tail.toArray(arr, 0); ss.pos.toArray(arr, 3);
+        ss.geo.attributes.position.needsUpdate = true;
+        ss.mat.opacity = Math.max(0, 0.95 * (1 - ss.age / ss.life));
+        if (ss.age >= ss.life) { scene.remove(ss.line); shootingStars.splice(i, 1); }
+      }
+
+      // ── Parachutist animation ──
+      if (parachuteState) {
+        const ps = parachuteState;
+        if (ps.phase === 'falling') {
+          const t = Math.min((Date.now()-ps.startTime)/ps.duration, 1);
+          const eased = 1-Math.pow(1-t, 2.2);
+          ps.mesh.position.lerpVectors(ps.startPos, ps.endPos, eased);
+          const outward = ps.mesh.position.clone().normalize();
+          ps.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), outward);
+          const sway = Math.sin(t*Math.PI*5)*0.12*(1-t);
+          ps.mesh.rotateZ(sway*0.04);
+          if (t>=1) {
+            if (ps.type==='land') {
+              ps.phase='landed';
+              // Zoom in close now that parachutist has landed
+              const tempV = ps.endPos.clone();
+              globe.localToWorld(tempV);
+              const landDir = tempV.normalize();
+              zoomTween = { startPos: camera.position.clone(), endPos: landDir.multiplyScalar(2.5), t:0, dur:55 };
+              setTimeout(()=>{ if(parachuteState===ps){globe.remove(ps.mesh);parachuteState=null;} },3500);
+            } else {
+              ps.phase='dying'; ps.deathStart=Date.now();
+            }
+          }
+        } else if (ps.phase==='dying') {
+          const t = Math.min((Date.now()-ps.deathStart)/600,1);
+          const sunkPos = ps.endPos.clone().addScaledVector(ps.normal,-t*0.14);
+          ps.mesh.position.copy(sunkPos);
+          ps.mesh.scale.setScalar(3.5*(1-t*0.92));
+          ps.mesh.rotateY(0.07);
+          if (t>=1) {
+            // Place dead body — starts tiny and scales up (smooth emerge)
+            const db = makeDeadBody();
+            db.scale.setScalar(0.01);
+            db.position.copy(ps.endPos);
+            db.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), ps.normal);
+            globe.add(db);
+            deadBodies.push({mesh:db, basePos:ps.endPos.clone(), normal:ps.normal.clone(), t:Math.random()*Math.PI*2, emerge:0});
+            globe.remove(ps.mesh);
+            parachuteState = null;
+            zoomCamera(5.5, 55); controls.enabled=true; globeRotPaused=false;
+          }
+        }
+        // ── PUBG follow-cam (ocean die) ──
+        if (ps && ps.followCam && ps.phase === 'falling') {
+          const paraWorldPos = new THREE.Vector3();
+          ps.mesh.getWorldPosition(paraWorldPos);
+          const outDir = paraWorldPos.clone().normalize();
+          const worldUp = new THREE.Vector3(0, 1, 0);
+          let sideDir = new THREE.Vector3().crossVectors(outDir, worldUp).normalize();
+          if (sideDir.lengthSq() < 0.01) sideDir.set(1, 0, 0);
+          const targetCamPos = paraWorldPos.clone()
+            .addScaledVector(outDir, 1.0)
+            .addScaledVector(sideDir, 1.1);
+          // Snap on first frame so mobile doesn't start with parachutist off-screen
+          if (!ps.camSnapped) {
+            camera.position.copy(targetCamPos);
+            ps.camSnapped = true;
+          } else {
+            camera.position.lerp(targetCamPos, 0.08);
+          }
+          camera.lookAt(paraWorldPos);
+        }
+      }
+
+      // ── Dead body gentle bobbing + emerge scale-up ──
+      deadBodies.forEach(db => {
+        db.t += 0.016;
+        // Smooth emerge: scale from 0 → 4.0 over ~1.2 seconds (easeOutBack)
+        if (db.emerge < 1) {
+          db.emerge = Math.min(1, db.emerge + 0.014);
+          const e = db.emerge;
+          // easeOutBack spring feel
+          const c1 = 1.70158, c3 = c1 + 1;
+          const eased = 1 + c3 * Math.pow(e-1,3) + c1 * Math.pow(e-1,2);
+          db.mesh.scale.setScalar(Math.max(0, 4.0 * eased));
+        }
+        const bob = Math.sin(db.t*1.2)*0.003;
+        db.mesh.position.copy(db.basePos.clone().addScaledVector(db.normal, bob));
+        db.mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), db.normal);
+        const tiltAx = new THREE.Vector3(-db.normal.z,0,db.normal.x).normalize();
+        db.mesh.rotateOnAxis(tiltAx, Math.sin(db.t*0.7)*0.06);
+      });
+
+      // ── 2D Weather overlay ──
+      {
+        const wc = document.getElementById('weatherCanvas');
+        if (wc) {
+          if (wc.width !== W() || wc.height !== H()) { wc.width = W(); wc.height = H(); }
+          const wCtx = wc.getContext('2d');
+          wCtx.clearRect(0, 0, wc.width, wc.height);
+          if (weatherAnim) {
+            const elapsed = Date.now() - weatherAnim.startTime;
+            if (elapsed >= weatherAnim.duration) {
+              stopWeather();
+            } else {
+              const fade = Math.min(1, (weatherAnim.duration - elapsed) / 600);
+              const { particles } = weatherAnim;
+              if (weatherAnim.type === 'money') {
+                particles.forEach(p => {
+                  p.x += p.vx + Math.sin(tick * 2.5 + p.phase) * p.swayAmp;
+                  p.y += p.vy;
+                  p.rot += p.rotSpeed;
+                  if (p.y > wc.height + 60) { p.y = p.y_reset - Math.random()*200; p.x = Math.random()*wc.width; }
+                  wCtx.save();
+                  wCtx.globalAlpha = fade * 0.92;
+                  wCtx.translate(p.x, p.y);
+                  wCtx.rotate(p.rot);
+                  wCtx.fillStyle = '#c8a020';
+                  wCtx.fillRect(-p.w/2, -p.h/2, p.w, p.h);
+                  wCtx.strokeStyle = '#a07010'; wCtx.lineWidth = 2;
+                  wCtx.strokeRect(-p.w/2, -p.h/2, p.w, p.h);
+                  wCtx.fillStyle = '#1a4a1a';
+                  wCtx.font = `bold ${Math.round(p.h*0.75)}px sans-serif`;
+                  wCtx.textAlign = 'center'; wCtx.textBaseline = 'middle';
+                  wCtx.fillText('$', 0, 0);
+                  wCtx.restore();
+                });
+              } else {
+                particles.forEach(p => {
+                  p.y += p.vy;
+                  if (p.y > wc.height + 40) { p.y = p.y_reset - Math.random()*100; p.x = Math.random()*wc.width; }
+                  wCtx.save();
+                  wCtx.globalAlpha = fade * 0.75;
+                  wCtx.strokeStyle = '#88BBFF'; wCtx.lineWidth = 1.5;
+                  wCtx.beginPath(); wCtx.moveTo(p.x, p.y); wCtx.lineTo(p.x-1, p.y+p.len); wCtx.stroke();
+                  wCtx.restore();
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // Skip controls.update() when PUBG follow-cam is active — it would override camera position
+      if (!(parachuteState && parachuteState.followCam && parachuteState.phase === 'falling')) {
+        controls.update();
+      }
+      renderer.render(scene, camera);
+    }
+    let calcBorderLine = null;
+    let homeHighlight  = null;
+    let flightArc      = null;
+    let flightDot      = null;
+    let flightArcPts   = [];
+    let flightArcT     = 0;
+    animate();
+
+    // ═══════════════════════════════════════════
+    //  COUNTRY CLICK — PRICE INFO
+    // ═══════════════════════════════════════════
+
+    // [latMin, latMax, lonMin, lonMax] — checked smallest-area first
+    // MYR_RATE: 1 USD ≈ 4.47 MYR (2025 approx)
+    const MYR_RATE = 4.47;
+    const MY_GRAD_USD = 670; // Malaysia fresh grad baseline (USD)
+
+    const COUNTRIES = [
+      // Very small / precise first
+      { name:'Singapore',    bb:[1.1,1.6,103.5,104.1], bigMac:5.00, logo:400, cur:'SGD — Singapore Dollar', grad:2580,  gradStr:'SGD 3,500' },
+      { name:'UAE',          bb:[22,26,51,56],          bigMac:4.48, logo:300, cur:'AED — UAE Dirham',        grad:1362,  gradStr:'AED 5,000' },
+      { name:'Netherlands',  bb:[51,53,3,7.5],          bigMac:5.20, logo:500, cur:'EUR — Euro',              grad:3000,  gradStr:'EUR 2,800' },
+      { name:'Denmark',      bb:[54,58,8,16],           bigMac:5.10, logo:520, cur:'DKK — Danish Krone',      grad:4600,  gradStr:'DKK 32,000' },
+      { name:'Switzerland',  bb:[45.8,47.8,5.9,10.6],  bigMac:8.17, logo:700, cur:'CHF — Swiss Franc',       grad:5700,  gradStr:'CHF 5,000' },
+      { name:'South Korea',  bb:[34,38.5,126,130],      bigMac:4.10, logo:200, cur:'KRW — South Korean Won',  grad:1880,  gradStr:'KRW 2,500,000' },
+      { name:'Japan',        bb:[30,46,130,146],        bigMac:3.70, logo:350, cur:'JPY — Japanese Yen',      grad:1450,  gradStr:'JPY 220,000' },
+      { name:'New Zealand',  bb:[-47,-34,165,178],      bigMac:4.90, logo:400, cur:'NZD — New Zealand Dollar',grad:2130,  gradStr:'NZD 3,500' },
+      { name:'United Kingdom',bb:[50,59,-8,2],          bigMac:4.86, logo:600, cur:'GBP — British Pound',     grad:3170,  gradStr:'GBP 2,500' },
+      { name:'Ireland',      bb:[51,55,-10,-6],         bigMac:5.50, logo:550, cur:'EUR — Euro',              grad:3000,  gradStr:'EUR 2,800' },
+      { name:'Portugal',     bb:[37,42,-9,-6],          bigMac:4.50, logo:350, cur:'EUR — Euro',              grad:1180,  gradStr:'EUR 1,100' },
+      { name:'Spain',        bb:[36,44,-9,4],           bigMac:4.70, logo:380, cur:'EUR — Euro',              grad:1500,  gradStr:'EUR 1,400' },
+      { name:'France',       bb:[42,51,-5,8],           bigMac:5.00, logo:450, cur:'EUR — Euro',              grad:2360,  gradStr:'EUR 2,200' },
+      { name:'Germany',      bb:[47,55,6,15],           bigMac:5.25, logo:500, cur:'EUR — Euro',              grad:3000,  gradStr:'EUR 2,800' },
+      { name:'Italy',        bb:[36,47,6,18],           bigMac:4.85, logo:400, cur:'EUR — Euro',              grad:1610,  gradStr:'EUR 1,500' },
+      { name:'Poland',       bb:[49,55,14,24],          bigMac:3.20, logo:200, cur:'PLN — Polish Złoty',      grad:1230,  gradStr:'PLN 5,000' },
+      { name:'Ukraine',      bb:[44,52,22,40],          bigMac:2.25, logo:100, cur:'UAH — Ukrainian Hryvnia', grad:460,   gradStr:'UAH 18,000' },
+      { name:'Turkey',       bb:[36,42,26,44],          bigMac:3.40, logo:90,  cur:'TRY — Turkish Lira',      grad:780,   gradStr:'TRY 25,000' },
+      { name:'Norway',       bb:[57,71,4,31],           bigMac:6.77, logo:650, cur:'NOK — Norwegian Krone',   grad:4150,  gradStr:'NOK 45,000' },
+      { name:'Sweden',       bb:[55,69,11,24],          bigMac:5.23, logo:550, cur:'SEK — Swedish Krona',     grad:3040,  gradStr:'SEK 32,000' },
+      { name:'Finland',      bb:[59,70,20,32],          bigMac:5.00, logo:500, cur:'EUR — Euro',              grad:2680,  gradStr:'EUR 2,500' },
+      { name:'Morocco',      bb:[27,36,-14,0],          bigMac:2.62, logo:70,  cur:'MAD — Moroccan Dirham',   grad:440,   gradStr:'MAD 4,500' },
+      { name:'Egypt',        bb:[22,32,24,37],          bigMac:1.99, logo:50,  cur:'EGP — Egyptian Pound',    grad:250,   gradStr:'EGP 8,000' },
+      { name:'Saudi Arabia', bb:[16,32,36,56],          bigMac:3.57, logo:200, cur:'SAR — Saudi Riyal',       grad:1870,  gradStr:'SAR 7,000' },
+      { name:'Nigeria',      bb:[4,14,3,15],            bigMac:3.50, logo:80,  cur:'NGN — Nigerian Naira',    grad:130,   gradStr:'NGN 200,000' },
+      { name:'Kenya',        bb:[-5,5,33,42],           bigMac:3.12, logo:80,  cur:'KES — Kenyan Shilling',   grad:385,   gradStr:'KES 50,000' },
+      { name:'South Africa', bb:[-35,-22,16,33],        bigMac:2.40, logo:120, cur:'ZAR — South African Rand',grad:1070,  gradStr:'ZAR 20,000' },
+      { name:'Pakistan',     bb:[24,37,60,77],          bigMac:2.20, logo:50,  cur:'PKR — Pakistani Rupee',   grad:215,   gradStr:'PKR 60,000' },
+      { name:'India',        bb:[8,36,68,97],           bigMac:2.90, logo:80,  cur:'INR — Indian Rupee',      grad:360,   gradStr:'INR 30,000' },
+      { name:'Bangladesh',   bb:[20,27,88,93],          bigMac:2.50, logo:40,  cur:'BDT — Bangladeshi Taka',  grad:225,   gradStr:'BDT 25,000' },
+      { name:'Thailand',     bb:[5,21,97,106],          bigMac:3.60, logo:80,  cur:'THB — Thai Baht',         grad:510,   gradStr:'THB 18,000' },
+      { name:'Vietnam',      bb:[8,23,102,110],         bigMac:2.77, logo:60,  cur:'VND — Vietnamese Dong',   grad:400,   gradStr:'VND 10,000,000' },
+      { name:'Philippines',  bb:[5,20,117,127],         bigMac:3.30, logo:60,  cur:'PHP — Philippine Peso',   grad:355,   gradStr:'PHP 20,000' },
+      { name:'Malaysia',     bb:[1,8,100,120],          bigMac:2.76, logo:80,  cur:'MYR — Malaysian Ringgit', grad:670,   gradStr:'MYR 3,000' },
+      { name:'Indonesia',    bb:[-10,6,95,141],         bigMac:3.38, logo:60,  cur:'IDR — Indonesian Rupiah', grad:338,   gradStr:'IDR 5,500,000' },
+      { name:'China',        bb:[18,53,73,135],         bigMac:3.45, logo:120, cur:'CNY — Chinese Yuan',      grad:1100,  gradStr:'CNY 8,000' },
+      { name:'Russia',       bb:[42,82,28,180],         bigMac:2.27, logo:120, cur:'RUB — Russian Ruble',     grad:760,   gradStr:'RUB 70,000' },
+      { name:'Colombia',     bb:[-5,13,-79,-66],        bigMac:3.55, logo:120, cur:'COP — Colombian Peso',    grad:610,   gradStr:'COP 2,500,000' },
+      { name:'Venezuela',    bb:[1,12,-73,-60],         bigMac:7.18, logo:80,  cur:'VES — Venezuelan Bolívar',grad:22,    gradStr:'VES 800' },
+      { name:'Peru',         bb:[-18,-1,-82,-68],       bigMac:3.58, logo:110, cur:'PEN — Peruvian Sol',      grad:530,   gradStr:'PEN 2,000' },
+      { name:'Chile',        bb:[-55,-18,-76,-65],      bigMac:3.30, logo:130, cur:'CLP — Chilean Peso',      grad:700,   gradStr:'CLP 650,000' },
+      { name:'Argentina',    bb:[-55,-22,-74,-53],      bigMac:2.97, logo:100, cur:'ARS — Argentine Peso',    grad:780,   gradStr:'ARS 700,000' },
+      { name:'Brazil',       bb:[-34,5,-74,-34],        bigMac:4.10, logo:150, cur:'BRL — Brazilian Real',    grad:490,   gradStr:'BRL 2,500' },
+      { name:'Mexico',       bb:[14,33,-118,-86],       bigMac:3.68, logo:120, cur:'MXN — Mexican Peso',      grad:800,   gradStr:'MXN 14,000' },
+      { name:'Canada',       bb:[42,84,-141,-52],       bigMac:5.12, logo:450, cur:'CAD — Canadian Dollar',   grad:2800,  gradStr:'CAD 3,800' },
+      { name:'United States',bb:[25,50,-125,-65],       bigMac:5.58, logo:800, cur:'USD — US Dollar',         grad:3500,  gradStr:'USD 3,500' },
+      { name:'Australia',    bb:[-45,-10,113,154],      bigMac:5.30, logo:450, cur:'AUD — Australian Dollar', grad:3150,  gradStr:'AUD 4,800' },
+    ];
+
+    function detectCountry(lat, lon) {
+      // Sort by area ascending → pick most specific match
+      const matches = COUNTRIES.filter(c => {
+        const [la,lb,loa,lob] = c.bb;
+        return lat>=la && lat<=lb && lon>=loa && lon<=lob;
+      });
+      if (!matches.length) return null;
+      return matches.reduce((best, c) => {
+        const area = (c.bb[1]-c.bb[0])*(c.bb[3]-c.bb[2]);
+        const bArea = (best.bb[1]-best.bb[0])*(best.bb[3]-best.bb[2]);
+        return area < bArea ? c : best;
+      });
+    }
+
+    // ── Country markers — pulsing pins ────────
+    {
+      const dotMat0 = new THREE.MeshBasicMaterial({ color:0xFF7733, depthWrite:false });
+      COUNTRIES.forEach(country => {
+        const lat = (country.bb[0]+country.bb[1])/2;
+        const lon = (country.bb[2]+country.bb[3])/2;
+        const pos = ll2v(lat, lon, R+0.016);
+        const outward = pos.clone().normalize();
+
+        // Solid pin dot
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(0.010,8,6), dotMat0.clone());
+        dot.position.copy(pos);
+        globe.add(dot);
+
+        // Pulsing ring — aligned to face outward
+        const ringMat = new THREE.MeshBasicMaterial({
+          color:0xFF9944, transparent:true, opacity:0.9,
+          side:THREE.DoubleSide, depthWrite:false, blending:THREE.AdditiveBlending
+        });
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.013,0.020,28), ringMat);
+        ring.position.copy(pos);
+        ring.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1), outward);
+        globe.add(ring);
+
+        // Second outer ring for double-pulse effect
+        const ring2Mat = new THREE.MeshBasicMaterial({
+          color:0xFFCC55, transparent:true, opacity:0,
+          side:THREE.DoubleSide, depthWrite:false, blending:THREE.AdditiveBlending
+        });
+        const ring2 = new THREE.Mesh(new THREE.RingGeometry(0.013,0.020,28), ring2Mat);
+        ring2.position.copy(pos);
+        ring2.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1), outward);
+        globe.add(ring2);
+
+        markerData.push({ dot, ring, ringMat, ring2, ring2Mat, t: Math.random()*Math.PI*2, country });
+      });
+    }
+
+    // ── Country tooltip ────────────────────────
+    const tooltip = document.createElement('div');
+    tooltip.style.cssText = 'position:fixed;display:none;pointer-events:none;background:rgba(4,12,26,0.88);color:#fff;font:13px/1 system-ui,sans-serif;padding:7px 13px;border-radius:8px;border:1px solid rgba(100,180,255,0.3);z-index:150;white-space:nowrap;';
+    document.body.appendChild(tooltip);
+
+    // ── Info Panel HTML ────────────────────────
+    const panel = document.createElement('div');
+    panel.id = 'cpanel';
+    panel.style.cssText = `
+      display:none; position:fixed; top:50%; left:50%;
+      transform:translate(-50%,-50%);
+      background:rgba(4,12,26,0.96);
+      border:1px solid rgba(80,160,255,0.30);
+      border-radius:14px; padding:24px 24px 20px;
+      color:#fff; font-family:system-ui,sans-serif;
+      width:min(360px, calc(100vw - 24px));
+      max-height:min(90vh, 720px); overflow-y:auto;
+      z-index:200; backdrop-filter:blur(14px);
+      box-shadow:0 12px 40px rgba(0,0,0,0.6);
+      pointer-events:all;
+      -webkit-overflow-scrolling:touch;
+    `;
+    panel.innerHTML = `
+      <button id="cpanel-x" style="position:absolute;top:12px;right:16px;background:none;border:none;color:rgba(255,255,255,0.55);font-size:22px;cursor:pointer;line-height:1;padding:8px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;">✕</button>
+      <div style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:rgba(100,180,255,0.7);margin-bottom:6px;padding-right:30px;">📍 <span id="cp-name"></span></div>
+      <div style="display:grid;gap:10px;margin-top:14px;">
+        <div style="background:rgba(255,255,255,0.07);border-radius:10px;padding:13px 16px;">
+          <div style="font-size:10px;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:5px;">💱 Local Currency</div>
+          <div id="cp-cur" style="font-size:14px;font-weight:500;color:#90CAF9;"></div>
+        </div>
+        <div style="background:rgba(255,255,255,0.07);border-radius:10px;padding:13px 16px;">
+          <div style="font-size:10px;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:5px;">🎓 Fresh Grad Salary / Month</div>
+          <div id="cp-grad" style="font-size:20px;font-weight:700;color:#CE93D8;"></div>
+          <div id="cp-grad-myr" style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;"></div>
+          <div id="cp-grad-cmp" style="font-size:13px;font-weight:700;margin-top:6px;border-radius:6px;padding:4px 10px;display:inline-block;"></div>
+        </div>
+      </div>
+
+      <!-- CTA: contextual headline + single prominent purple button (opens lead modal) -->
+      <div id="cp-cta" style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(168,85,247,0.28);">
+        <div id="cp-cta-headline" style="font-size:15px;font-weight:800;color:#fff;line-height:1.3;margin-bottom:4px;">Ready to earn global rates?</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.6);line-height:1.4;margin-bottom:12px;">Free training — how to land US/UK/AU clients</div>
+        <button id="cp-open-modal" type="button" class="fb-cta-btn"
+          style="width:100%;padding:15px 16px;border:none;border-radius:12px;
+          background:linear-gradient(135deg,#B855F7,#7C3AED);color:#fff;
+          font-size:15px;font-weight:800;letter-spacing:1px;text-transform:uppercase;
+          cursor:pointer;min-height:52px;
+          box-shadow:0 8px 26px rgba(168,85,247,0.45), inset 0 1px 0 rgba(255,255,255,0.25);
+          transition:transform 0.15s, box-shadow 0.2s, filter 0.2s;
+          font-family:inherit;">
+          🎯 Get Free Training →
+        </button>
+      </div>
+
+      <a href="https://freedombusiness.io" target="_blank" rel="noopener"
+         style="display:block;margin-top:12px;text-align:center;font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:rgba(255,255,255,0.3);text-decoration:none;">
+        Powered by Freedom Business
+      </a>
+    `;
+    document.body.appendChild(panel);
+
+    const cpName   = document.getElementById('cp-name');
+    const cpCur    = document.getElementById('cp-cur');
+    const cpGrad   = document.getElementById('cp-grad');
+    const cpGradMyr= document.getElementById('cp-grad-myr');
+    const cpGradCmp= document.getElementById('cp-grad-cmp');
+
+    function showPanel(country) {
+      cpName.textContent = country.name;
+      cpCur.textContent  = country.cur;
+
+      // Fresh grad salary
+      const gradUSD = country.grad;
+      const diffUSD = gradUSD - MY_GRAD_USD;
+      const absDiff = Math.abs(diffUSD).toLocaleString();
+      cpGrad.textContent    = country.gradStr + ' / mo';
+      cpGradMyr.textContent = `≈ USD ${gradUSD.toLocaleString()} / mo  (vs Malaysia USD ${MY_GRAD_USD.toLocaleString()})`;
+      if (country.name === 'Malaysia') {
+        cpGradCmp.textContent = '🏠 This is home base!';
+        cpGradCmp.style.background = 'rgba(100,180,255,0.18)';
+        cpGradCmp.style.color = '#90CAF9';
+      } else if (diffUSD > 0) {
+        cpGradCmp.textContent = `USD ${absDiff} more per month! 🎉`;
+        cpGradCmp.style.background = 'rgba(50,200,80,0.18)';
+        cpGradCmp.style.color = '#69F0AE';
+      } else {
+        cpGradCmp.textContent = `USD ${absDiff} less per month 😔`;
+        cpGradCmp.style.background = 'rgba(220,60,60,0.18)';
+        cpGradCmp.style.color = '#FF8A80';
+      }
+      globeRotPaused = true;
+
+      // 1) Spin globe so the country faces the camera
+      const lat = (country.bb[0]+country.bb[1])/2;
+      const lon = (country.bb[2]+country.bb[3])/2;
+      spinGlobeToCountry(lat, lon);
+
+      // Celebration / weather animation
+      if (country.name !== 'Malaysia') {
+        if (diffUSD > 0) startMoneyRain(lat, lon);
+        else startRain(lat, lon);
+      } else {
+        stopWeather();
+      }
+
+      // 2) Dramatic camera zoom — aim toward country's exact post-spin world position.
+      // spinGlobeToCountry sets globe.rotation.y = PI/2 - theta.
+      // Full matrix: M = Ry(PI/2-theta) * Rz(0.41) applied to ll2v(lat,lon,1).
+      const theta_sp = (lon + 180) * Math.PI / 180;
+      const rotMat_sp = new THREE.Matrix4().makeRotationFromEuler(
+        new THREE.Euler(0, Math.PI / 2 - theta_sp, 0.41, 'XYZ')
+      );
+      const worldDir = ll2v(lat, lon, 1.0).applyMatrix4(rotMat_sp).normalize();
+      // Zoom to 4.5 during parachute fall (parachutist starts at R+2.2=3.7, must be < camera dist)
+      // After landing, a tighter zoom to 2.5 is triggered from the animate loop
+      zoomTween = {
+        startPos: camera.position.clone(),
+        endPos: worldDir.multiplyScalar(4.5),
+        t: 0, dur: 70
+      };
+      controls.enabled = false;
+      setTimeout(() => { panel.style.display = 'block'; }, 500);
+    }
+    function closePanel() {
+      panel.style.display = 'none';
+      globeRotPaused = false;
+      stopWeather();
+      zoomCamera(5.5, 50);
+    }
+
+    document.getElementById('cpanel-x').addEventListener('click', e => { e.stopPropagation(); closePanel(); });
+    panel.addEventListener('click', e => e.stopPropagation());
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closePanel(); });
+
+    // ── Freelance Calculator Sidebar ───────────
+    // Exchange rates vs 1 USD (approximate 2025)
+    const FX = {};
+    COUNTRIES.forEach(c => {
+      const code = c.cur.split('—')[0].trim().split(' ')[0];
+      // derive rate from local salary / USD salary
+      const localAmt = parseFloat(c.gradStr.replace(/[^0-9.]/g,''));
+      if (c.grad > 0) FX[code] = localAmt / c.grad;
+    });
+    // Ensure USD = 1
+    FX['USD'] = 1;
+
+    // Unique currency list from countries
+    const currencyCountries = COUNTRIES.map(c => {
+      const code = c.cur.split('—')[0].trim().split(' ')[0];
+      return { code, name: c.name, curLabel: c.cur };
+    });
+    // Deduplicate by code (keep first)
+    const seenCur = {};
+    const uniqueCurrencies = currencyCountries.filter(c => {
+      if (seenCur[c.code]) return false;
+      seenCur[c.code] = true;
+      return true;
+    });
+
+    // Build sidebar
+    const calcSidebar = document.createElement('div');
+    calcSidebar.id = 'calc-sidebar';
+    calcSidebar.style.cssText = `
+      position:fixed; top:0; right:0;
+      width:300px; height:100%;
+      overflow-y:auto; overflow-x:hidden;
+      background:rgba(4,12,26,0.97);
+      border-left:1px solid rgba(80,160,255,0.2);
+      padding:24px 20px 28px;
+      color:#fff; font-family:system-ui,sans-serif;
+      z-index:250; backdrop-filter:blur(18px);
+      box-shadow:-8px 0 40px rgba(0,0,0,0.6);
+      transition:transform 0.35s cubic-bezier(.4,0,.2,1);
+      pointer-events:all;
+    `;
+    // Scrollbar styling
+    calcSidebar.innerHTML = `
+      <style>
+        #calc-sidebar::-webkit-scrollbar { width:6px; }
+        #calc-sidebar::-webkit-scrollbar-thumb { background:rgba(100,160,255,0.3); border-radius:4px; }
+        #calc-sidebar::-webkit-scrollbar-track { background:transparent; }
+        #calc-sidebar select, #calc-sidebar input {
+          width:100%; background:rgba(255,255,255,0.08); color:#fff;
+          border:1px solid rgba(100,180,255,0.25); border-radius:10px;
+          padding:13px 15px; font-size:18px; font-family:system-ui,sans-serif;
+          outline:none; transition:border-color 0.2s;
+        }
+        #calc-sidebar select:focus, #calc-sidebar input:focus {
+          border-color:rgba(100,180,255,0.6);
+        }
+        #calc-sidebar select option { background:#0a1628; color:#fff; }
+        #calc-sidebar label {
+          display:block; font-size:14px; text-transform:uppercase;
+          letter-spacing:1.4px; color:rgba(255,255,255,0.55); margin-bottom:8px;
+          font-weight:700;
+        }
+        #calc-sidebar #cta-submit:hover { transform:translateY(-1px); box-shadow:0 6px 22px rgba(105,240,174,0.4); }
+        #calc-sidebar #cta-submit:active { transform:translateY(0); }
+        #calc-sidebar #cta-submit[disabled] { opacity:0.55; cursor:wait; background:linear-gradient(135deg,#5aa889,#3a7f5a); }
+        #calc-sidebar #calc-cta input { font-size:15px; padding:11px 13px; }
+        #calc-sidebar #calc-cta a:hover { color:rgba(144,202,249,0.7); }
+      </style>
+      <div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid rgba(100,180,255,0.15);">
+        <div style="font-size:18px;letter-spacing:2.5px;text-transform:uppercase;color:rgba(100,180,255,0.8);font-weight:700;">🧮 Freelance Calc</div>
+      </div>
+
+      <div style="display:grid;gap:18px;">
+        <!-- Your Country -->
+        <div>
+          <label>🏠 Your Country</label>
+          <select id="calc-home"></select>
+        </div>
+
+        <!-- Your Monthly Income -->
+        <div>
+          <label>💰 Your Monthly Income</label>
+          <div style="display:flex;gap:10px;align-items:center;">
+            <span id="calc-home-code" style="font-size:17px;color:#90CAF9;min-width:44px;font-weight:700;"></span>
+            <input id="calc-income" type="number" placeholder="0" value="" min="0" />
+          </div>
+        </div>
+
+        <div style="border-top:1px solid rgba(100,180,255,0.15);padding-top:18px;">
+          <label>🌍 Client's Country</label>
+          <select id="calc-client"></select>
+        </div>
+
+        <div>
+          <label>👥 Number of Clients</label>
+          <input id="calc-clients" type="number" placeholder="5" value="5" min="1" />
+        </div>
+
+        <div>
+          <label>💵 Rate per Client</label>
+          <div style="display:flex;gap:10px;align-items:center;">
+            <span id="calc-client-code" style="font-size:17px;color:#CE93D8;min-width:44px;font-weight:700;"></span>
+            <input id="calc-rate" type="number" placeholder="500" value="500" min="0" />
+          </div>
+        </div>
+
+        <!-- Results -->
+        <div id="calc-results" style="display:none;border-top:1px solid rgba(100,180,255,0.15);padding-top:18px;display:grid;gap:12px;">
+          <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:16px 18px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:7px;font-weight:700;">Total Earned (Client Currency)</div>
+            <div id="calc-total-foreign" style="font-size:26px;font-weight:700;color:#CE93D8;"></div>
+          </div>
+          <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:16px 18px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:7px;font-weight:700;">Converted to Your Currency</div>
+            <div id="calc-total-home" style="font-size:32px;font-weight:800;color:#69F0AE;"></div>
+          </div>
+          <div id="calc-comparison" style="background:rgba(255,255,255,0.07);border-radius:12px;padding:16px 18px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:7px;font-weight:700;">vs Your Current Income</div>
+            <div id="calc-diff" style="font-size:20px;font-weight:700;"></div>
+          </div>
+          <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:16px 18px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:7px;font-weight:700;">Exchange Rate</div>
+            <div id="calc-exchange" style="font-size:20px;font-weight:700;color:#90CAF9;"></div>
+          </div>
+          <div style="background:rgba(255,255,255,0.07);border-radius:12px;padding:16px 18px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:7px;font-weight:700;">Their Fresh Grad Salary</div>
+            <div id="calc-client-grad" style="font-size:20px;font-weight:700;color:#FFD54F;"></div>
+          </div>
+        </div>
+
+        <!-- Sidebar CTA: contextual headline + purple button (opens shared lead modal) -->
+        <div id="calc-cta" style="display:none;border-top:1px solid rgba(168,85,247,0.25);padding-top:20px;margin-top:4px;">
+          <div style="font-size:17px;font-weight:800;color:#fff;line-height:1.3;margin-bottom:6px;">
+            You just saw the math.<br/><span style="color:#B855F7;">Now get the clients.</span>
+          </div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.65);line-height:1.45;margin-bottom:14px;">
+            Free playbook — how freelancers from your country land US/UK/AU clients.
+          </div>
+          <button id="calc-open-modal" type="button" class="fb-cta-btn"
+            style="width:100%;padding:15px 16px;border:none;border-radius:12px;
+            background:linear-gradient(135deg,#B855F7,#7C3AED);color:#fff;
+            font-size:15px;font-weight:800;letter-spacing:1px;text-transform:uppercase;
+            cursor:pointer;min-height:52px;
+            box-shadow:0 8px 26px rgba(168,85,247,0.45), inset 0 1px 0 rgba(255,255,255,0.25);
+            transition:transform 0.15s, box-shadow 0.2s, filter 0.2s;
+            font-family:inherit;">
+            🎯 Get Free Training →
+          </button>
+          <a href="https://freedombusiness.io" target="_blank" rel="noopener"
+             style="display:block;margin-top:14px;text-align:center;font-size:11px;
+             letter-spacing:1.2px;text-transform:uppercase;color:rgba(255,255,255,0.35);
+             text-decoration:none;">
+            Powered by Freedom Business
+          </a>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(calcSidebar);
+
+    // Populate selects
+    const calcHome = document.getElementById('calc-home');
+    const calcClient = document.getElementById('calc-client');
+    // Blank placeholder for client country
+    const clientPlaceholder = document.createElement('option');
+    clientPlaceholder.value = ''; clientPlaceholder.textContent = '— Select a country —';
+    clientPlaceholder.disabled = false; clientPlaceholder.selected = true;
+    calcClient.appendChild(clientPlaceholder);
+
+    COUNTRIES.forEach((c, i) => {
+      const code = c.cur.split('—')[0].trim().split(' ')[0];
+      const o1 = document.createElement('option');
+      o1.value = i; o1.textContent = `${c.name} (${code})`;
+      if (c.name === 'Vietnam') o1.selected = true;
+      calcHome.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = i; o2.textContent = `${c.name} (${code})`;
+      calcClient.appendChild(o2);
+    });
+
+    const calcHomeCode   = document.getElementById('calc-home-code');
+    const calcClientCode = document.getElementById('calc-client-code');
+    const calcIncome     = document.getElementById('calc-income');
+    const calcClients    = document.getElementById('calc-clients');
+    const calcRate       = document.getElementById('calc-rate');
+    const calcResults    = document.getElementById('calc-results');
+    const calcTotalForeign = document.getElementById('calc-total-foreign');
+    const calcTotalHome    = document.getElementById('calc-total-home');
+    const calcDiff         = document.getElementById('calc-diff');
+
+    function getCode(countryIdx) {
+      return COUNTRIES[countryIdx].cur.split('—')[0].trim().split(' ')[0];
+    }
+    function updateCurrLabels() {
+      calcHomeCode.textContent = getCode(calcHome.value);
+      calcClientCode.textContent = calcClient.value !== '' ? getCode(calcClient.value) : '';
+    }
+    function calcUpdate() {
+      updateCurrLabels();
+      const homeIdx   = parseInt(calcHome.value);
+      const clientIdx = parseInt(calcClient.value);
+      // Hide results if no client country selected
+      if (calcClient.value === '') { calcResults.style.display = 'none'; return; }
+      const income    = parseFloat(calcIncome.value) || 0;
+      const clients   = parseInt(calcClients.value) || 0;
+      const rate      = parseFloat(calcRate.value) || 0;
+
+      const homeCode   = getCode(homeIdx);
+      const clientCode = getCode(clientIdx);
+
+      const totalForeign = clients * rate;
+      // Convert: foreign → USD → home
+      const toUSD    = totalForeign / (FX[clientCode] || 1);
+      const toHome   = toUSD * (FX[homeCode] || 1);
+
+      calcResults.style.display = 'grid';
+      calcTotalForeign.textContent = `${clientCode} ${totalForeign.toLocaleString(undefined, {maximumFractionDigits:0})}`;
+      calcTotalHome.textContent    = `${homeCode} ${Math.round(toHome).toLocaleString()}`;
+
+      if (income > 0) {
+        const diff = toHome - income;
+        const absDiff = Math.abs(Math.round(diff)).toLocaleString();
+        if (diff > 0) {
+          calcDiff.textContent = `${homeCode} ${absDiff} more than your income 🎉`;
+          calcDiff.style.color = '#69F0AE';
+        } else if (diff < 0) {
+          calcDiff.textContent = `${homeCode} ${absDiff} less than your income`;
+          calcDiff.style.color = '#FF8A80';
+        } else {
+          calcDiff.textContent = 'Same as your income';
+          calcDiff.style.color = '#90CAF9';
+        }
+        document.getElementById('calc-comparison').style.display = 'block';
+      } else {
+        document.getElementById('calc-comparison').style.display = 'none';
+      }
+
+      // Exchange rate: 1 clientCode = ? homeCode
+      const clientPerUSD = FX[clientCode] || 1;
+      const homePerUSD   = FX[homeCode]   || 1;
+      const rate1 = homePerUSD / clientPerUSD;
+      const rateStr = rate1 >= 1000
+        ? Math.round(rate1).toLocaleString()
+        : rate1 >= 10
+          ? rate1.toFixed(1)
+          : rate1.toFixed(3);
+      document.getElementById('calc-exchange').textContent = `1 ${clientCode} = ${rateStr} ${homeCode}`;
+
+      // Target country fresh grad salary
+      document.getElementById('calc-client-grad').textContent =
+        COUNTRIES[clientIdx].gradStr + ' / month';
+    }
+
+    // ══════════════════════════════════════════════
+    //  LEAD CAPTURE — shared logic for cpanel + sidebar
+    // ══════════════════════════════════════════════
+
+    // Google Form config
+    const GFORM_ID = '1FAIpQLSc3BHDLrmWpRmBvRK6qEltVq42bDeC9cLsu_1fc2Sf4duvPDg';
+    const GFORM_ENTRY = {
+      email:         'entry.220926565',
+      whatsapp:      'entry.474614504',
+      homeCountry:   'entry.1113213026',
+      clientCountry: 'entry.896519511',
+      earnings:      'entry.475770546',
+    };
+
+    // Webinar landing page (one URL for now; params allow geo-routing later)
+    const WEBINAR_URL = 'https://freedombusiness.io/register2p';
+
+    // Country → market region (for future geo-segmentation)
+    const MARKET_MAP = {
+      'Malaysia':'SEA','Singapore':'SEA','Indonesia':'SEA','Thailand':'SEA','Vietnam':'SEA','Philippines':'SEA',
+      'India':'SA','Pakistan':'SA','Bangladesh':'SA',
+      'United States':'US','Canada':'NA',
+      'United Kingdom':'UK','Ireland':'UK',
+      'Australia':'ANZ','New Zealand':'ANZ',
+      'France':'EU','Germany':'EU','Spain':'EU','Italy':'EU','Netherlands':'EU','Poland':'EU',
+      'Japan':'EA','South Korea':'EA','China':'EA','Taiwan':'EA','Hong Kong':'EA',
+      'Brazil':'LATAM','Mexico':'LATAM','Argentina':'LATAM','Colombia':'LATAM','Peru':'LATAM','Chile':'LATAM',
+      'UAE':'MENA','Saudi Arabia':'MENA','Egypt':'MENA','Turkey':'MENA',
+      'Nigeria':'AF','Kenya':'AF','South Africa':'AF',
+      'Russia':'CIS',
+    };
+    const getMarket = (name) => MARKET_MAP[name] || 'OTHER';
+
+    const isValidEmail = s => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s.trim());
+    // E.164-ish: optional +, 8–15 digits, spaces/dashes allowed
+    const isValidWa = s => /^\+?[\d][\d\s-]{7,16}$/.test(s.trim());
+
+    const hasSubmitted = () => !!localStorage.getItem('fb_lead_email');
+    const markSubmitted = (email) => { try { localStorage.setItem('fb_lead_email', email); } catch(e) {} };
+
+    function buildWebinarURL({email, country}) {
+      const url = new URL(WEBINAR_URL);
+      if (email)   url.searchParams.set('email', email);
+      if (country) url.searchParams.set('country', country);
+      if (country) url.searchParams.set('market',  getMarket(country));
+      url.searchParams.set('utm_source', 'earth');
+      url.searchParams.set('utm_medium', 'globe');
+      return url.toString();
+    }
+
+    function postLeadToGForm({email, whatsapp, homeCountry, clientCountry, earnings}) {
+      const body = new URLSearchParams();
+      body.append(GFORM_ENTRY.email, email);
+      body.append(GFORM_ENTRY.whatsapp, whatsapp);
+      if (homeCountry)   body.append(GFORM_ENTRY.homeCountry,   homeCountry);
+      if (clientCountry) body.append(GFORM_ENTRY.clientCountry, clientCountry);
+      if (earnings)      body.append(GFORM_ENTRY.earnings,      earnings);
+      return fetch(`https://docs.google.com/forms/d/e/${GFORM_ID}/formResponse`, {
+        method: 'POST', mode: 'no-cors',
+        headers: {'Content-Type':'application/x-www-form-urlencoded'},
+        body: body.toString()
+      }).catch(()=>{});
+    }
+
+    // Validate + submit + switch to thanks UI + start redirect countdown
+    function handleLeadSubmit({emailInput, waInput, errorEl, formEl, thanksEl, submitBtn, countdownEl, homeCountry, clientCountry, earnings, onDone}) {
+      errorEl.style.display = 'none';
+      const email = emailInput.value.trim();
+      if (!isValidEmail(email)) {
+        errorEl.textContent = 'Please enter a valid email.';
+        errorEl.style.display = 'block';
+        emailInput.focus();
+        return;
+      }
+      const whatsapp = waInput ? waInput.value.trim() : '';
+      if (!whatsapp || !isValidWa(whatsapp)) {
+        errorEl.textContent = 'WhatsApp number (with country code) is required.';
+        errorEl.style.display = 'block';
+        if (waInput) waInput.focus();
+        return;
+      }
+      submitBtn.disabled = true;
+      const origText = submitBtn.textContent;
+      submitBtn.textContent = 'Sending...';
+
+      postLeadToGForm({email, whatsapp, homeCountry, clientCountry, earnings});
+      markSubmitted(email);
+
+      // Optimistic success (no-cors is opaque)
+      setTimeout(() => {
+        formEl.style.display = 'none';
+        thanksEl.style.display = 'block';
+        submitBtn.textContent = origText;
+        submitBtn.disabled = false;
+        try { showToast('Sent! Redirecting to your training...', 'rgba(40,180,100,0.95)'); } catch(e) {}
+        startRedirectCountdown({countdownEl, email, country: clientCountry, onDone});
+      }, 600);
+    }
+
+    // Counts down then navigates to webinar URL with params
+    function startRedirectCountdown({countdownEl, email, country, seconds = 3, onDone}) {
+      const url = buildWebinarURL({email, country});
+      let n = seconds;
+      if (countdownEl) countdownEl.textContent = n;
+      const iv = setInterval(() => {
+        n -= 1;
+        if (countdownEl) countdownEl.textContent = Math.max(n, 0);
+        if (n <= 0) {
+          clearInterval(iv);
+          if (onDone) onDone();
+          window.location.href = url;
+        }
+      }, 1000);
+    }
+
+    // ── Shared Lead Modal (opened by purple buttons in cpanel + sidebar) ──
+    const leadBackdrop = document.createElement('div');
+    leadBackdrop.id = 'lead-modal-backdrop';
+    leadBackdrop.style.cssText = `
+      display:none; position:fixed; inset:0;
+      background:rgba(2,4,10,0.75);
+      z-index:400;
+      backdrop-filter:blur(6px);
+      align-items:center; justify-content:center;
+      padding:16px; box-sizing:border-box;
+      pointer-events:all;
+    `;
+    leadBackdrop.innerHTML = `
+      <style>
+        #lead-modal input {
+          width:100%; box-sizing:border-box;
+          background:rgba(255,255,255,0.06); color:#fff;
+          border:1px solid rgba(168,85,247,0.35);
+          border-radius:10px; padding:14px 15px;
+          font-size:15px; font-family:inherit; outline:none;
+          min-height:48px;
+          transition:border-color 0.2s, background 0.2s;
+        }
+        #lead-modal input:focus {
+          border-color:rgba(184,85,247,0.75);
+          background:rgba(168,85,247,0.08);
+        }
+        #lead-modal input::placeholder { color:rgba(255,255,255,0.35); }
+        #lead-submit:hover {
+          transform:translateY(-2px);
+          box-shadow:0 14px 36px rgba(168,85,247,0.6), inset 0 1px 0 rgba(255,255,255,0.3) !important;
+          filter:brightness(1.1);
+        }
+        #lead-submit:active { transform:translateY(0); }
+        #lead-submit[disabled] { opacity:0.6; cursor:wait; }
+        @keyframes leadModalIn {
+          from { opacity:0; transform:scale(0.94) translateY(8px); }
+          to   { opacity:1; transform:scale(1) translateY(0); }
+        }
+        #lead-modal { animation: leadModalIn 0.22s cubic-bezier(.2,.8,.3,1.1); }
+      </style>
+      <div id="lead-modal" style="
+        position:relative;
+        width:min(440px, 100%);
+        max-height:min(92vh, 720px); overflow-y:auto;
+        background:linear-gradient(160deg, rgba(24,12,48,0.98), rgba(6,10,24,0.98));
+        border:1px solid rgba(168,85,247,0.4);
+        border-radius:18px;
+        padding:28px 26px 22px;
+        box-shadow:0 24px 72px rgba(60,20,120,0.5), inset 0 0 0 1px rgba(168,85,247,0.08);
+        color:#fff; font-family:system-ui,sans-serif;
+        -webkit-overflow-scrolling:touch;
+      ">
+        <button id="lead-modal-x" type="button"
+          style="position:absolute;top:10px;right:10px;background:none;border:none;color:rgba(255,255,255,0.55);font-size:22px;cursor:pointer;line-height:1;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:50%;">
+          ✕
+        </button>
+
+        <div id="lead-form">
+          <div style="font-size:11px;letter-spacing:2.5px;text-transform:uppercase;color:#C084FC;font-weight:800;margin-bottom:8px;">🎯 Free Training</div>
+          <div id="lead-headline" style="font-size:22px;font-weight:800;color:#fff;line-height:1.25;margin-bottom:8px;">Land clients paying <span style="color:#C084FC">US/UK/AU rates</span></div>
+          <div style="font-size:14px;color:rgba(255,255,255,0.72);line-height:1.5;margin-bottom:20px;">The exact playbook freelancers use to land high-tier country clients. Delivered to your inbox + WhatsApp.</div>
+          <div style="display:grid;gap:10px;">
+            <input id="lead-email" type="email" placeholder="Your email" required autocomplete="email" />
+            <input id="lead-wa" type="tel" placeholder="WhatsApp (with country code)" autocomplete="tel" required />
+            <button id="lead-submit" type="button"
+              style="padding:16px 18px;border:none;border-radius:12px;
+              background:linear-gradient(135deg,#B855F7,#7C3AED);color:#fff;
+              font-size:15px;font-weight:800;letter-spacing:1px;text-transform:uppercase;
+              cursor:pointer;min-height:54px;margin-top:4px;
+              box-shadow:0 10px 30px rgba(168,85,247,0.5), inset 0 1px 0 rgba(255,255,255,0.25);
+              transition:transform 0.15s, box-shadow 0.2s, filter 0.2s;
+              font-family:inherit;">
+              Get Instant Access →
+            </button>
+            <div id="lead-error" style="display:none;font-size:12px;color:#FF8A80;margin-top:4px;text-align:center;"></div>
+          </div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.38);margin-top:16px;text-align:center;letter-spacing:0.3px;">🔒 No spam. Unsubscribe anytime.</div>
+        </div>
+
+        <div id="lead-thanks" style="display:none;text-align:center;padding:18px 8px 8px;">
+          <div style="font-size:52px;color:#69F0AE;margin-bottom:6px;line-height:1;">✓</div>
+          <div style="font-size:22px;font-weight:800;color:#69F0AE;margin-bottom:8px;">You're in!</div>
+          <div id="lead-redirect-msg" style="font-size:14px;color:rgba(255,255,255,0.78);line-height:1.45;margin-bottom:20px;">
+            Redirecting to your free training in <span id="lead-countdown" style="color:#69F0AE;font-weight:800;">3</span>s...
+          </div>
+          <button id="lead-goto" type="button"
+            style="padding:14px 22px;border:none;border-radius:12px;background:linear-gradient(135deg,#69F0AE,#2bc876);color:#042b18;font-size:14px;font-weight:800;letter-spacing:0.8px;text-transform:uppercase;cursor:pointer;min-height:48px;">
+            Take me there now →
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(leadBackdrop);
+
+    const leadModal     = document.getElementById('lead-modal');
+    const leadModalX    = document.getElementById('lead-modal-x');
+    const leadForm      = document.getElementById('lead-form');
+    const leadThanks    = document.getElementById('lead-thanks');
+    const leadHeadline  = document.getElementById('lead-headline');
+    const leadEmail     = document.getElementById('lead-email');
+    const leadWa        = document.getElementById('lead-wa');
+    const leadErr       = document.getElementById('lead-error');
+    const leadSubmit    = document.getElementById('lead-submit');
+    const leadGoto      = document.getElementById('lead-goto');
+    const leadRedirMsg  = document.getElementById('lead-redirect-msg');
+
+    // Track context that triggered the modal (for GForm tagging + redirect params)
+    // `country` = clicked/selected country object (used for headline + redirect)
+    // `homeCountry` / `earnings` populated only when opened from the sidebar calculator
+    let _modalContext = { country: null, homeCountry: null, earnings: null };
+    let _cpCurrentCountry = null;
+
+    function contextualHeadline(country) {
+      if (!country) return 'Land clients paying <span style="color:#C084FC">US/UK/AU rates</span>';
+      const diffUSD = (country.grad || 0) - (typeof MY_GRAD_USD !== 'undefined' ? MY_GRAD_USD : 0);
+      if (country.name === 'Malaysia') {
+        return 'Ready to earn <span style="color:#C084FC">global rates?</span>';
+      } else if (diffUSD > 0) {
+        return 'Want to land clients<br/>paying <span style="color:#C084FC">like in ' + country.name + '?</span>';
+      } else {
+        return 'Land clients paying<br/><span style="color:#C084FC">USD rates instead</span>';
+      }
+    }
+
+    function openLeadModal({country, homeCountry, earnings}) {
+      _modalContext = { country, homeCountry: homeCountry || null, earnings: earnings || null };
+      leadHeadline.innerHTML = contextualHeadline(country);
+      leadErr.style.display = 'none';
+
+      if (hasSubmitted()) {
+        // Already signed up — show thanks state with direct "go to training" (no countdown)
+        leadForm.style.display = 'none';
+        leadThanks.style.display = 'block';
+        leadRedirMsg.innerHTML = 'You\'re already signed up — tap below to jump to your training.';
+      } else {
+        leadForm.style.display = 'block';
+        leadThanks.style.display = 'none';
+        leadEmail.value = '';
+        leadWa.value = '';
+        leadSubmit.disabled = false;
+        leadSubmit.textContent = 'Get Instant Access →';
+      }
+      leadBackdrop.style.display = 'flex';
+      // Autofocus on desktop; avoid on mobile to prevent keyboard pop-up surprise
+      if (window.innerWidth > 700 && !hasSubmitted()) {
+        setTimeout(() => leadEmail.focus(), 80);
+      }
+    }
+
+    function closeLeadModal() { leadBackdrop.style.display = 'none'; }
+
+    leadModalX.addEventListener('click', closeLeadModal);
+    leadBackdrop.addEventListener('click', (e) => { if (e.target === leadBackdrop) closeLeadModal(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && leadBackdrop.style.display !== 'none') closeLeadModal();
+    });
+
+    leadSubmit.addEventListener('click', () => {
+      handleLeadSubmit({
+        emailInput: leadEmail, waInput: leadWa, errorEl: leadErr,
+        formEl: leadForm, thanksEl: leadThanks, submitBtn: leadSubmit,
+        countdownEl: document.getElementById('lead-countdown'),
+        homeCountry:   _modalContext.homeCountry,
+        clientCountry: _modalContext.country ? _modalContext.country.name : null,
+        earnings:      _modalContext.earnings,
+      });
+    });
+    leadGoto.addEventListener('click', () => {
+      const email = localStorage.getItem('fb_lead_email') || leadEmail.value.trim();
+      window.location.href = buildWebinarURL({
+        email,
+        country: _modalContext.country ? _modalContext.country.name : null
+      });
+    });
+    [leadEmail, leadWa].forEach(el => {
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter') leadSubmit.click(); });
+    });
+
+    // ── Wire purple buttons in cpanel and sidebar to open the shared modal ──
+    const cpOpenBtn   = document.getElementById('cp-open-modal');
+    const calcOpenBtn = document.getElementById('calc-open-modal');
+    const cpCtaHead   = document.getElementById('cp-cta-headline');
+    const calcCta     = document.getElementById('calc-cta');
+
+    // Update button label when user has already submitted (both cpanel + sidebar)
+    function refreshCtaButtons() {
+      const submitted = hasSubmitted();
+      [cpOpenBtn, calcOpenBtn].forEach(btn => {
+        if (!btn) return;
+        if (submitted) {
+          btn.innerHTML = '✓ Go to your training →';
+          btn.style.background = 'linear-gradient(135deg,#69F0AE,#2bc876)';
+          btn.style.boxShadow  = '0 8px 26px rgba(105,240,174,0.45), inset 0 1px 0 rgba(255,255,255,0.25)';
+          btn.style.color      = '#042b18';
+        } else {
+          btn.innerHTML = '🎯 Get Free Training →';
+          btn.style.background = 'linear-gradient(135deg,#B855F7,#7C3AED)';
+          btn.style.boxShadow  = '0 8px 26px rgba(168,85,247,0.45), inset 0 1px 0 rgba(255,255,255,0.25)';
+          btn.style.color      = '#fff';
+        }
+      });
+    }
+    refreshCtaButtons();
+
+    cpOpenBtn.addEventListener('click', () => {
+      if (hasSubmitted()) {
+        // Already signed up — skip modal, go straight to training
+        const email = localStorage.getItem('fb_lead_email') || '';
+        window.location.href = buildWebinarURL({
+          email, country: _cpCurrentCountry ? _cpCurrentCountry.name : null
+        });
+        return;
+      }
+      openLeadModal({ country: _cpCurrentCountry });
+    });
+    calcOpenBtn.addEventListener('click', () => {
+      const clientIdx = parseInt(calcClient.value);
+      const country = Number.isInteger(clientIdx) ? COUNTRIES[clientIdx] : null;
+      if (hasSubmitted()) {
+        const email = localStorage.getItem('fb_lead_email') || '';
+        window.location.href = buildWebinarURL({
+          email, country: country ? country.name : null
+        });
+        return;
+      }
+      const homeIdx = parseInt(calcHome.value);
+      const homeCountry = Number.isInteger(homeIdx) ? COUNTRIES[homeIdx].name : null;
+      const earnings = calcTotalHome.textContent || null;
+      openLeadModal({ country, homeCountry, earnings });
+    });
+
+    // Hover affordances for purple buttons
+    document.querySelectorAll('.fb-cta-btn').forEach(btn => {
+      btn.addEventListener('mouseenter', () => {
+        btn.style.transform = 'translateY(-2px)';
+        btn.style.filter    = 'brightness(1.08)';
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.transform = '';
+        btn.style.filter    = '';
+      });
+    });
+
+    // Patch calcUpdate: show/hide sidebar CTA in sync with results
+    const _origCalcUpdate = calcUpdate;
+    calcUpdate = function() {
+      _origCalcUpdate.apply(this, arguments);
+      calcCta.style.display = (calcResults.style.display === 'grid') ? 'block' : 'none';
+    };
+
+    // Patch showPanel: track country + update cpanel contextual headline
+    //                  + auto-sync calculator (set clicked country as client)
+    //                  + auto-open calculator sidebar on desktop
+    const _origShowPanel = showPanel;
+    showPanel = function(country) {
+      _origShowPanel.call(this, country);
+      _cpCurrentCountry = country;
+      const diffUSD = (country.grad || 0) - (typeof MY_GRAD_USD !== 'undefined' ? MY_GRAD_USD : 0);
+      let head;
+      if (country.name === 'Malaysia') {
+        head = 'Ready to earn <span style="color:#C084FC">global rates?</span>';
+      } else if (diffUSD > 0) {
+        head = 'Want to land <span style="color:#C084FC">clients paying this?</span>';
+      } else {
+        head = 'Land clients paying <span style="color:#C084FC">USD rates</span>';
+      }
+      cpCtaHead.innerHTML = head;
+      refreshCtaButtons();
+
+      // Auto-sync calculator: set clicked country as the "client" so earnings
+      // calculate against it immediately
+      const idx = COUNTRIES.indexOf(country);
+      if (idx >= 0 && String(idx) !== calcClient.value) {
+        calcClient.value = String(idx);
+        calcUpdate();
+      }
+
+      // Auto-open the calculator sidebar on desktop (avoid covering cpanel on mobile)
+      if (!calcOpen && window.innerWidth > 720) {
+        toggleCalc();
+      }
+    };
+
+    // ── Landmark → Country mapping ─────────────
+    const COUNTRY_LANDMARK_MAP = {
+      'France':         'Eiffel Tower',
+      'UAE':            'Burj Khalifa',
+      'Egypt':          'Pyramids of Giza',
+      'United Kingdom': 'Big Ben',
+      'India':          'Taj Mahal',
+      'Italy':          'Colosseum',
+      'Australia':      'Sydney Opera House',
+      'United States':  'Statue of Liberty',
+      'Japan':          'Tokyo Tower',
+      'Brazil':         'Christ the Redeemer',
+      'Spain':          'Sagrada Familia',
+      'Russia':         'Kremlin',
+      'Turkey':         'Hagia Sophia',
+      'China':          'Great Wall of China',
+      'Peru':           'Machu Picchu',
+      'Malaysia':       'KLCC Twin Towers',
+    };
+
+    // helper: dispose a THREE.Object3D and all children geometries/materials
+    function disposeObj(obj) {
+      obj.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+          else child.material.dispose();
+        }
+      });
+    }
+
+    function showHomeLandmark(country) {
+      if (homeHighlight) {
+        // Restore landmark building materials before disposing
+        if (homeHighlight.userData.homeBldgMats) {
+          homeHighlight.userData.homeBldgMats.forEach(({ child, orig, glow }) => {
+            child.material = orig;
+            glow.dispose();
+          });
+        }
+        disposeObj(homeHighlight); globe.remove(homeHighlight); homeHighlight = null;
+      }
+
+      const lmName = COUNTRY_LANDMARK_MAP[country.name];
+      let lmLat = (country.bb[0] + country.bb[1]) / 2;
+      let lmLon = (country.bb[2] + country.bb[3]) / 2;
+      if (lmName) {
+        const lmDef = landmarks.find(l => l.name === lmName);
+        if (lmDef) { lmLat = lmDef.lat; lmLon = lmDef.lon; }
+      }
+
+      const hGroup = new THREE.Group();
+      // Use depthTest:true so globe naturally occludes markers on the back face
+      const pos     = ll2v(lmLat, lmLon, R + 0.025); // well above surface
+      const outward = pos.clone().normalize();
+      const quat    = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1), outward);
+
+      function ringMesh(inner, outer, color, opacity) {
+        const mat = new THREE.MeshBasicMaterial({
+          color, transparent: true, opacity,
+          side: THREE.DoubleSide, depthTest: true, depthWrite: false,
+          blending: THREE.AdditiveBlending
+        });
+        const mesh = new THREE.Mesh(new THREE.RingGeometry(inner, outer, 48), mat);
+        mesh.position.copy(pos);
+        mesh.quaternion.copy(quat);
+        mesh.renderOrder = 5;
+        return { mesh, mat };
+      }
+
+      // Centre bright dot
+      const dotMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, depthTest: true, depthWrite: false,
+        blending: THREE.AdditiveBlending
+      });
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.020, 16, 10), dotMat);
+      dot.position.copy(pos); dot.renderOrder = 5;
+      hGroup.add(dot);
+
+      // 3 concentric pulsing rings
+      const r1 = ringMesh(0.030, 0.052, 0xffee00, 1.0); hGroup.add(r1.mesh);
+      const r2 = ringMesh(0.060, 0.090, 0xffaa00, 0.7); hGroup.add(r2.mesh);
+      const r3 = ringMesh(0.105, 0.160, 0xff6600, 0.4); hGroup.add(r3.mesh);
+
+      // Upward beam (line segments radiating outward)
+      const beamPts = [];
+      for (let i = 0; i <= 24; i++) beamPts.push(ll2v(lmLat, lmLon, R + 0.02 + i * 0.045));
+      const beamMat = new THREE.LineBasicMaterial({
+        color: 0xffff88, transparent: true, opacity: 0.7,
+        depthTest: true, depthWrite: false, blending: THREE.AdditiveBlending
+      });
+      const beam = new THREE.Line(new THREE.BufferGeometry().setFromPoints(beamPts), beamMat);
+      beam.renderOrder = 5;
+      hGroup.add(beam);
+
+      // Glow the landmark building itself if one exists for this country
+      let homeBldgMats = null;
+      if (lmName) {
+        const lmEntry = landmarkData.find(d => d.name === lmName);
+        if (lmEntry) {
+          homeBldgMats = [];
+          lmEntry.bldg.traverse(child => {
+            if (child.isMesh && child.material && !Array.isArray(child.material)) {
+              const orig = child.material;
+              const glow = orig.clone();
+              glow.emissive = new THREE.Color(0xffbb44);
+              glow.emissiveIntensity = 1.2;
+              child.material = glow;
+              homeBldgMats.push({ child, orig, glow });
+            }
+          });
+        }
+      }
+
+      hGroup.userData = { dotMat, r1: r1.mat, r2: r2.mat, r3: r3.mat, beamMat, ring3mesh: r3.mesh, homeBldgMats };
+      globe.add(hGroup);
+      homeHighlight = hGroup;
+
+      controls.enabled = false;
+      globeRotPaused = true;
+      countryOverlay.style.display = 'none'; // hide client overlay when home changes
+      spinGlobeToCountry(lmLat, lmLon);
+      const theta_hl = (lmLon + 180) * Math.PI / 180;
+      const rotMat_hl = new THREE.Matrix4().makeRotationFromEuler(
+        new THREE.Euler(0, Math.PI / 2 - theta_hl, 0.41, 'XYZ')
+      );
+      const endPos = ll2v(lmLat, lmLon, 1.0).applyMatrix4(rotMat_hl).normalize().multiplyScalar(3.5);
+      zoomTween = { startPos: camera.position.clone(), endPos, t: 0, dur: 70 };
+    }
+
+    // Build a ✈ sprite texture once
+    const _planeCanvas = document.createElement('canvas');
+    _planeCanvas.width = 128; _planeCanvas.height = 128;
+    { const c = _planeCanvas.getContext('2d');
+      c.clearRect(0,0,128,128);
+      c.font = '96px serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillStyle = '#ffffff'; c.fillText('✈', 64, 64); }
+    const _planeTex = new THREE.CanvasTexture(_planeCanvas);
+
+    function drawFlightArc(homeCountry, clientCountry) {
+      // Fully remove previous arc + plane
+      if (flightArc) { disposeObj(flightArc); globe.remove(flightArc); flightArc = null; }
+      if (flightDot) { flightDot.material.dispose(); globe.remove(flightDot); flightDot = null; }
+      flightArcPts = [];
+
+      const latA = (homeCountry.bb[0]   + homeCountry.bb[1])   / 2;
+      const lonA = (homeCountry.bb[2]   + homeCountry.bb[3])   / 2;
+      const latB = (clientCountry.bb[0] + clientCountry.bb[1]) / 2;
+      const lonB = (clientCountry.bb[2] + clientCountry.bb[3]) / 2;
+
+      const STEPS = 120;
+      const vA = ll2v(latA, lonA, R).normalize();
+      const vB = ll2v(latB, lonB, R).normalize();
+      for (let i = 0; i <= STEPS; i++) {
+        const t = i / STEPS;
+        const v = new THREE.Vector3().lerpVectors(vA, vB, t).normalize();
+        flightArcPts.push(v.clone().multiplyScalar(R + 0.07 + 0.30 * Math.sin(Math.PI * t)));
+      }
+
+      // Single clean arc line (no glow duplicate)
+      const arcGroup = new THREE.Group();
+      const arcGeo = new THREE.BufferGeometry().setFromPoints(flightArcPts);
+
+      const arcLine = new THREE.Line(arcGeo, new THREE.LineBasicMaterial({
+        color: 0x88ccff, transparent: true, opacity: 0.7,
+        depthTest: true, depthWrite: false, blending: THREE.AdditiveBlending
+      }));
+      arcLine.renderOrder = 4;
+      arcGroup.add(arcLine);
+
+      globe.add(arcGroup);
+      flightArc = arcGroup;
+
+      // Plane sprite — always visible, faces camera
+      const spriteMat = new THREE.SpriteMaterial({
+        map: _planeTex, transparent: true, opacity: 1.0,
+        depthTest: false, depthWrite: false, sizeAttenuation: true
+      });
+      flightDot = new THREE.Sprite(spriteMat);
+      flightDot.scale.set(0.18, 0.18, 1);
+      flightDot.position.copy(flightArcPts[0]);
+      globe.add(flightDot);
+
+      flightArcT = 0;
+    }
+
+    // Track last known home currency so we can convert income on country switch
+    let prevHomeCode = getCode(calcHome.value);
+
+    // Set income to home country's local grad salary on init
+    function setHomeIncomeDefault() {
+      const c = COUNTRIES[parseInt(calcHome.value)];
+      const localAmt = parseFloat(c.gradStr.replace(/[^0-9.]/g,''));
+      calcIncome.value = Math.round(localAmt);
+    }
+    setHomeIncomeDefault();
+
+    calcHome.addEventListener('change', () => {
+      const newCode = getCode(calcHome.value);
+      const income = parseFloat(calcIncome.value);
+      if (income > 0 && prevHomeCode !== newCode) {
+        const inUSD = income / (FX[prevHomeCode] || 1);
+        calcIncome.value = Math.round(inUSD * (FX[newCode] || 1));
+      }
+      prevHomeCode = newCode;
+      showHomeLandmark(COUNTRIES[parseInt(calcHome.value)]);
+      calcUpdate();
+    });
+
+    updateCurrLabels();
+    calcUpdate();
+
+    [calcHome, calcClient, calcIncome, calcClients, calcRate].forEach(el =>
+      el.addEventListener('input', calcUpdate)
+    );
+
+    // Toggle sidebar — separate tab that stays visible when collapsed
+    let calcOpen = false;
+
+    // Inject @keyframes for first-visit pulse on the calc tab
+    const calcTabStyle = document.createElement('style');
+    calcTabStyle.textContent = `
+      @keyframes calcTabPulse {
+        0%,100% { box-shadow: 0 0 0 0 rgba(100,180,255,0.55), -4px 0 18px rgba(0,0,0,0.5); }
+        50%     { box-shadow: 0 0 0 14px rgba(100,180,255,0),   -4px 0 18px rgba(0,0,0,0.5); }
+      }
+      #calc-tab.first-visit { animation: calcTabPulse 1.6s ease-out infinite; }
+      #calc-tab:hover { background:rgba(20,50,110,0.96) !important; color:#fff !important; }
+    `;
+    document.head.appendChild(calcTabStyle);
+
+    const calcTab = document.createElement('button');
+    calcTab.id = 'calc-tab';
+    calcTab.innerHTML = '🧮<br/><span style="font-size:9px;letter-spacing:1px;">CALC</span>';
+    calcTab.style.cssText = `
+      position:fixed; top:50%; right:300px; transform:translateY(-50%);
+      width:40px; height:72px;
+      background:rgba(4,12,26,0.97); color:rgba(180,220,255,0.95);
+      border:1px solid rgba(80,160,255,0.35); border-right:none;
+      border-radius:10px 0 0 10px;
+      font-size:18px; font-weight:700; cursor:pointer; z-index:251;
+      backdrop-filter:blur(18px);
+      transition:right 0.35s cubic-bezier(.4,0,.2,1), background 0.2s, color 0.2s;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      pointer-events:all; line-height:1.15;
+      box-shadow:-4px 0 18px rgba(0,0,0,0.5);
+    `;
+    document.body.appendChild(calcTab);
+
+    // First-visit pulse to draw attention (stops after 8s or first click)
+    if (!localStorage.getItem('fb_seen_calc_tab')) {
+      calcTab.classList.add('first-visit');
+      const stopPulse = () => {
+        calcTab.classList.remove('first-visit');
+        try { localStorage.setItem('fb_seen_calc_tab', '1'); } catch(e) {}
+      };
+      setTimeout(stopPulse, 8000);
+      calcTab.addEventListener('click', stopPulse, { once: true });
+    }
+
+    // ── Reset / zoom-out button (bottom-left) ─
+    const resetBtn = document.createElement('button');
+    resetBtn.textContent = '🌍  Reset View';
+    resetBtn.style.cssText = `
+      position:fixed; bottom:32px; left:32px;
+      background:rgba(4,12,26,0.88); color:rgba(100,180,255,0.85);
+      font:600 13px system-ui,sans-serif; letter-spacing:0.5px;
+      padding:10px 20px; border-radius:10px;
+      border:1px solid rgba(80,160,255,0.3);
+      cursor:pointer; z-index:300; backdrop-filter:blur(10px);
+      box-shadow:0 4px 18px rgba(0,0,0,0.4);
+      transition:background 0.2s, color 0.2s;
+      pointer-events:all;
+    `;
+    resetBtn.onmouseenter = () => { resetBtn.style.background='rgba(20,50,110,0.95)'; resetBtn.style.color='#fff'; };
+    resetBtn.onmouseleave = () => { resetBtn.style.background='rgba(4,12,26,0.88)'; resetBtn.style.color='rgba(100,180,255,0.85)'; };
+    resetBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      zoomCamera(5.5, 55);
+      controls.enabled = true;
+      globeRotPaused = false;
+      if (calcBorderLine) { globe.remove(calcBorderLine); calcBorderLine = null; }
+      countryOverlay.style.display = 'none';
+    });
+    resetBtn.addEventListener('mousedown', e => e.stopPropagation());
+    document.body.appendChild(resetBtn);
+
+    // Also remove the old inline toggle button
+    const oldToggle = document.getElementById('calc-toggle');
+    if (oldToggle) oldToggle.remove();
+
+    // Give the canvas a smooth transition for the globe-shift effect
+    renderer.domElement.style.transition = 'transform 0.35s cubic-bezier(.4,0,.2,1)';
+
+    function shiftGlobe(open) {
+      // Shift globe left by half the sidebar width so it stays centred in visible area
+      renderer.domElement.style.transform = open ? 'translateX(-150px)' : '';
+    }
+
+    function toggleCalc() {
+      calcOpen = !calcOpen;
+      if (calcOpen) {
+        calcSidebar.style.transform = 'translateX(0)';
+        calcTab.style.right = '300px';
+        calcTab.innerHTML = '◀';
+      } else {
+        calcSidebar.style.transform = 'translateX(300px)';
+        calcTab.style.right = '0px';
+        calcTab.innerHTML = '🧮<br/><span style="font-size:9px;letter-spacing:1px;">CALC</span>';
+      }
+      shiftGlobe(calcOpen);
+    }
+
+    // Sidebar starts collapsed — no globe shift initially
+    calcSidebar.style.transform = 'translateX(300px)';
+    calcTab.style.right = '0px';
+    calcTab.innerHTML = '🧮';
+    shiftGlobe(false);
+    calcTab.addEventListener('click', e => { e.stopPropagation(); toggleCalc(); });
+
+    // Country highlight on globe — filled overlay + outline
+    function showCountryBorder(country) {
+      // Remove previous
+      if (calcBorderLine) { globe.remove(calcBorderLine); calcBorderLine = null; }
+
+      const [latS, latN, lonW, lonE] = country.bb;
+      const SEG = 48;
+      const overlayR = R + 0.003;
+      const lineR    = R + 0.006;
+      const group = new THREE.Group();
+
+      // ── Filled overlay mesh ──────────────────
+      const positions = [];
+      const indices   = [];
+      for (let row = 0; row <= SEG; row++) {
+        const lat = latS + (latN - latS) * row / SEG;
+        for (let col = 0; col <= SEG; col++) {
+          const lon = lonW + (lonE - lonW) * col / SEG;
+          const v = ll2v(lat, lon, overlayR);
+          positions.push(v.x, v.y, v.z);
+        }
+      }
+      for (let row = 0; row < SEG; row++) {
+        for (let col = 0; col < SEG; col++) {
+          const a = row * (SEG + 1) + col;
+          const b = a + 1;
+          const c = a + (SEG + 1);
+          const d = c + 1;
+          indices.push(a, c, b, b, c, d);
+        }
+      }
+      const fillGeo = new THREE.BufferGeometry();
+      fillGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      fillGeo.setIndex(indices);
+      const fillMat = new THREE.MeshBasicMaterial({
+        color: 0x44aaff, transparent: true, opacity: 0.18,
+        side: THREE.DoubleSide, depthWrite: false,
+        blending: THREE.AdditiveBlending
+      });
+      group.add(new THREE.Mesh(fillGeo, fillMat));
+
+      // ── Outline border ───────────────────────
+      const edgePts = [];
+      for (let i = 0; i <= SEG; i++) edgePts.push(ll2v(latS, lonW + (lonE - lonW) * i / SEG, lineR)); // S
+      for (let i = 0; i <= SEG; i++) edgePts.push(ll2v(latS + (latN - latS) * i / SEG, lonE, lineR)); // E
+      for (let i = 0; i <= SEG; i++) edgePts.push(ll2v(latN, lonE - (lonE - lonW) * i / SEG, lineR)); // N
+      for (let i = 0; i <= SEG; i++) edgePts.push(ll2v(latN - (latN - latS) * i / SEG, lonW, lineR)); // W
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(edgePts);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0x00eeff, transparent: true, opacity: 1.0, depthWrite: false, blending: THREE.AdditiveBlending });
+      group.add(new THREE.LineLoop(lineGeo, lineMat));
+
+      // ── Glow border (wider, dimmer) ──────────
+      const glowMat = new THREE.LineBasicMaterial({ color: 0x0066ff, transparent: true, opacity: 0.4, depthWrite: false, blending: THREE.AdditiveBlending });
+      const glowGeo = new THREE.BufferGeometry().setFromPoints(edgePts);
+      group.add(new THREE.LineLoop(glowGeo, glowMat));
+
+      // Store refs for pulse animation
+      group.userData.lineMat  = lineMat;
+      group.userData.glowMat  = glowMat;
+      group.userData.fillMat  = fillMat;
+
+      globe.add(group);
+      calcBorderLine = group;
+    }
+
+    // Zoom globe when client country changes — aim camera directly at the country
+    // Flag emoji map
+    const FLAG = {
+      'Singapore':'🇸🇬','UAE':'🇦🇪','Netherlands':'🇳🇱','Denmark':'🇩🇰','Switzerland':'🇨🇭',
+      'South Korea':'🇰🇷','Japan':'🇯🇵','New Zealand':'🇳🇿','United Kingdom':'🇬🇧','Ireland':'🇮🇪',
+      'Portugal':'🇵🇹','Spain':'🇪🇸','France':'🇫🇷','Germany':'🇩🇪','Italy':'🇮🇹',
+      'Poland':'🇵🇱','Ukraine':'🇺🇦','Turkey':'🇹🇷','Norway':'🇳🇴','Sweden':'🇸🇪',
+      'Finland':'🇫🇮','Morocco':'🇲🇦','Egypt':'🇪🇬','Saudi Arabia':'🇸🇦','Nigeria':'🇳🇬',
+      'Kenya':'🇰🇪','South Africa':'🇿🇦','Pakistan':'🇵🇰','India':'🇮🇳','Bangladesh':'🇧🇩',
+      'Thailand':'🇹🇭','Vietnam':'🇻🇳','Philippines':'🇵🇭','Malaysia':'🇲🇾','Indonesia':'🇮🇩',
+      'China':'🇨🇳','Russia':'🇷🇺','Colombia':'🇨🇴','Venezuela':'🇻🇪','Peru':'🇵🇪',
+      'Chile':'🇨🇱','Argentina':'🇦🇷','Brazil':'🇧🇷','Mexico':'🇲🇽','Canada':'🇨🇦',
+      'United States':'🇺🇸','Australia':'🇦🇺',
+    };
+
+    // Country name + flag overlay
+    const countryOverlay = document.createElement('div');
+    countryOverlay.style.cssText = `
+      position:fixed; top:32px; left:50%; transform:translateX(-50%);
+      display:none; flex-direction:column; align-items:center; gap:6px;
+      pointer-events:none; z-index:300;
+      animation:fadeInDown 0.4s ease;
+    `;
+    document.head.insertAdjacentHTML('beforeend', `<style>
+      @keyframes fadeInDown {
+        from { opacity:0; transform:translateX(-50%) translateY(-16px); }
+        to   { opacity:1; transform:translateX(-50%) translateY(0); }
+      }
+    </style>`);
+    countryOverlay.innerHTML = `
+      <div id="co-flag" style="font-size:56px;line-height:1;filter:drop-shadow(0 2px 12px rgba(0,0,0,0.7));"></div>
+      <div id="co-name" style="font-size:28px;font-weight:800;color:#fff;
+        font-family:system-ui,sans-serif;letter-spacing:1px;
+        text-shadow:0 2px 16px rgba(0,0,0,0.9),0 0 40px rgba(100,180,255,0.4);"></div>
+    `;
+    document.body.appendChild(countryOverlay);
+
+    function showCountryOverlay(country) {
+      const flag = FLAG[country.name] || '🌐';
+      document.getElementById('co-flag').textContent = flag;
+      document.getElementById('co-name').textContent = country.name;
+      countryOverlay.style.display = 'flex';
+      // Reset animation
+      countryOverlay.style.animation = 'none';
+      countryOverlay.offsetHeight; // reflow
+      countryOverlay.style.animation = 'fadeInDown 0.4s ease';
+    }
+
+    function focusCalcCountry(c) {
+      const lat = (c.bb[0] + c.bb[1]) / 2;
+      const lon = (c.bb[2] + c.bb[3]) / 2;
+
+      globeRotPaused = true;
+      controls.enabled = false;
+
+      showCountryBorder(c);
+      drawFlightArc(COUNTRIES[parseInt(calcHome.value)], c);
+      showCountryOverlay(c);
+      calcUpdate();
+
+      // Spin globe so the country faces the camera (+Z), and zoom simultaneously.
+      spinGlobeToCountry(lat, lon);
+
+      // Compute the EXACT world position of the target country after the spin.
+      // spinGlobeToCountry sets globe.rotation.y = PI/2 - theta (where theta = (lon+180)*PI/180).
+      // Full transform: M = Ry(PI/2-theta) * Rz(0.41), applied to ll2v(lat,lon,1).
+      // Using Matrix4 avoids the simplified formula that only works near lon≈-90.
+      const theta   = (lon + 180) * Math.PI / 180;
+      const targetRY = Math.PI / 2 - theta;
+      const pLocal  = ll2v(lat, lon, 1.0);
+      const rotMat  = new THREE.Matrix4().makeRotationFromEuler(
+        new THREE.Euler(0, targetRY, 0.41, 'XYZ')
+      );
+      const worldDir = pLocal.clone().applyMatrix4(rotMat).normalize();
+      const zoomEnd  = worldDir.multiplyScalar(3.5);
+      zoomTween = { startPos: camera.position.clone(), endPos: zoomEnd, t: 0, dur: 80 };
+    }
+
+    calcClient.addEventListener('change', () => {
+      if (calcClient.value === '') return;
+      focusCalcCountry(COUNTRIES[parseInt(calcClient.value)]);
+    });
+
+    // Initial state: show home country only
+    setTimeout(() => {
+      showHomeLandmark(COUNTRIES[parseInt(calcHome.value)]);
+    }, 800);
+
+    // Prevent globe interaction when clicking sidebar
+    calcSidebar.addEventListener('click', e => e.stopPropagation());
+    calcSidebar.addEventListener('mousedown', e => e.stopPropagation());
+    calcTab.addEventListener('mousedown', e => e.stopPropagation());
+
+    // ── Raycasting click handler ───────────────
+    const raycaster = new THREE.Raycaster();
+    const _mouse = new THREE.Vector2();
+    let _mouseDownX = 0, _mouseDownY = 0;
+
+    // Cursor: pointer over earth or marker dots
+    renderer.domElement.addEventListener('mousemove', e => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      _mouse.x = ((e.clientX - rect.left) / rect.width)  *  2 - 1;
+      _mouse.y = -((e.clientY - rect.top)  / rect.height) *  2 + 1;
+      raycaster.setFromCamera(_mouse, camera);
+
+      // Landmark hover — hemisphere check + 2D proximity to avoid glancing-angle false positives
+      const lmHits = raycaster.intersectObjects(landmarkData.map(d => d.bldg), true);
+      if (lmHits.length) {
+        let rootObj = lmHits[0].object;
+        while (rootObj && rootObj.parent !== lmGroup) rootObj = rootObj.parent;
+        if (rootObj && rootObj.userData.lmIdx !== undefined) {
+          const lmWorldPos = new THREE.Vector3();
+          rootObj.getWorldPosition(lmWorldPos);
+          // 1) Hemisphere: landmark must face the camera
+          const surfaceNormal = lmWorldPos.clone().normalize();
+          const toCamera = camera.position.clone().normalize();
+          if (surfaceNormal.dot(toCamera) > 0.2) {
+            // 2) Screen-space proximity: mouse must be within 70px of landmark's projected position
+            const projPos = lmWorldPos.clone().project(camera);
+            const sw = renderer.domElement.clientWidth;
+            const sh = renderer.domElement.clientHeight;
+            const screenX = (projPos.x * 0.5 + 0.5) * sw;
+            const screenY = (0.5 - projPos.y * 0.5) * sh;
+            const screenDist = Math.hypot(e.clientX - screenX, e.clientY - screenY);
+            if (screenDist < 70) {
+              const lm = landmarkData[rootObj.userData.lmIdx];
+              tooltip.textContent = '🏛️ ' + lm.name;
+              tooltip.style.display = 'block';
+              tooltip.style.left = (e.clientX + 16) + 'px';
+              tooltip.style.top  = (e.clientY - 8)  + 'px';
+              renderer.domElement.style.cursor = 'pointer';
+              return;
+            }
+          }
+        }
+      }
+
+      const dots = markerData.map(m => m.dot);
+      const dotHit = raycaster.intersectObjects(dots, false);
+      if (dotHit.length) {
+        const idx = dots.indexOf(dotHit[0].object);
+        tooltip.textContent = markerData[idx].country.name;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (e.clientX + 16) + 'px';
+        tooltip.style.top  = (e.clientY - 8)  + 'px';
+        renderer.domElement.style.cursor = 'pointer';
+      } else {
+        const earthHit = raycaster.intersectObject(earth, false);
+        if (earthHit.length) {
+          renderer.domElement.style.cursor = 'crosshair';
+          // Show country name tooltip when hovering earth
+          const lp2 = globe.worldToLocal(earthHit[0].point.clone());
+          const len2 = lp2.length();
+          const lat2 = 90 - Math.acos(Math.max(-1,Math.min(1,lp2.y/len2)))*180/Math.PI;
+          let lon2 = Math.atan2(lp2.z,-lp2.x)*180/Math.PI-180;
+          if (lon2 < -180) lon2 += 360;
+          const hc = detectCountry(lat2, lon2);
+          if (hc) {
+            tooltip.textContent = '🪂 ' + hc.name;
+            tooltip.style.display = 'block';
+            tooltip.style.left = (e.clientX+16)+'px';
+            tooltip.style.top  = (e.clientY-8)+'px';
+          } else {
+            tooltip.textContent = '🌊 Ocean';
+            tooltip.style.display = 'block';
+            tooltip.style.left = (e.clientX+16)+'px';
+            tooltip.style.top  = (e.clientY-8)+'px';
+          }
+        } else {
+          tooltip.style.display = 'none';
+          renderer.domElement.style.cursor = 'default';
+        }
+      }
+    });
+
+    renderer.domElement.addEventListener('mousedown', e => {
+      _mouseDownX = e.clientX; _mouseDownY = e.clientY;
+    });
+    renderer.domElement.addEventListener('mouseup', e => {
+      const dx = e.clientX - _mouseDownX, dy = e.clientY - _mouseDownY;
+      if (Math.sqrt(dx*dx+dy*dy) > 6) return; // drag, not click
+
+      const rect = renderer.domElement.getBoundingClientRect();
+      _mouse.x = ((e.clientX - rect.left) / rect.width)  *  2 - 1;
+      _mouse.y = -((e.clientY - rect.top)  / rect.height) *  2 + 1;
+      raycaster.setFromCamera(_mouse, camera);
+
+      // Hit test: dots → earth (both work, dots just give exact country center)
+      let clickLat, clickLon;
+      const dots = markerData.map(m => m.dot);
+      const dotHits = raycaster.intersectObjects(dots, false);
+      if (dotHits.length) {
+        const country = markerData[dots.indexOf(dotHits[0].object)].country;
+        clickLat = (country.bb[0]+country.bb[1])/2;
+        clickLon = (country.bb[2]+country.bb[3])/2;
+      } else {
+        const hits = raycaster.intersectObject(earth, false);
+        if (!hits.length) { if (panel.style.display!=='none') closePanel(); return; }
+        const lp = globe.worldToLocal(hits[0].point.clone());
+        const len = lp.length();
+        clickLat = 90 - Math.acos(Math.max(-1,Math.min(1,lp.y/len)))*180/Math.PI;
+        clickLon = Math.atan2(lp.z,-lp.x)*180/Math.PI-180;
+        if (clickLon < -180) clickLon += 360;
+      }
+
+      const country = detectCountry(clickLat, clickLon);
+      if (country) {
+        // Snap to country center for clean parachute landing
+        const cLat = (country.bb[0]+country.bb[1])/2;
+        const cLon = (country.bb[2]+country.bb[3])/2;
+        showPanel(country);
+        // Delay launch until globe spin (~65 frames @ 60fps ≈ 1100ms) is mostly done
+        setTimeout(() => launchParachutist(cLat, cLon, 'land'), 950);
+      } else {
+        // Check if this is actual ocean or uncovered land (grass with no country data)
+        let isActualOcean = true;
+        if (earthCanvas && !dotHits.length) {
+          const hits2 = raycaster.intersectObject(earth, false);
+          if (hits2.length && hits2[0].uv) {
+            const u = hits2[0].uv.x, v = hits2[0].uv.y;
+            const px2 = Math.floor(u * earthCanvas.width);
+            const py2 = Math.floor((1-v) * earthCanvas.height);
+            const d = earthCanvas.getContext('2d').getImageData(Math.max(0,Math.min(earthCanvas.width-1,px2)), Math.max(0,Math.min(earthCanvas.height-1,py2)), 1, 1).data;
+            // Ocean: blue dominates; Land: green dominates
+            if (d[1] > d[2]) isActualOcean = false; // green > blue → land
+          }
+        }
+        if (!isActualOcean) {
+          showToast('🌿 No data for this region', 'rgba(40,110,40,0.92)');
+          return;
+        }
+        // True ocean — spin + zoom, parachutist falls, dead body appears
+        launchParachutist(clickLat, clickLon, 'die');
+        globeRotPaused = true;
+        controls.enabled = false;
+        if (panel.style.display!=='none') closePanel();
+        spinGlobeToCountry(clickLat, clickLon);
+        // PUBG-style: camera follows the parachutist dynamically (handled in animate loop)
+        if (parachuteState) parachuteState.followCam = true;
+      }
+    });
+
+    // Dev version badge — localhost only, hidden in production
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      const devBadge = document.createElement('div');
+      devBadge.style.cssText = `
+        position:fixed; bottom:8px; left:8px; z-index:9999;
+        background:rgba(255,200,0,0.92); color:#1a1000;
+        font:bold 11px monospace; padding:3px 10px; border-radius:5px;
+        pointer-events:none; user-select:none;
+        box-shadow:0 2px 8px rgba(0,0,0,0.4);
+      `;
+      devBadge.textContent = '🔧 DEV · ' + new Date(document.lastModified).toLocaleTimeString();
+      document.body.appendChild(devBadge);
+    }
+
+    function onResize() {
+      const w = W(), h = H();
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    }
+    window.addEventListener('resize', onResize);
+    window.addEventListener('load', onResize);
+    setTimeout(onResize, 100);
+    } catch(err) {
+      console.error('EARTH ERROR:', err.message, err.stack);
+    }
+  </script>
+</body>
+</html>
